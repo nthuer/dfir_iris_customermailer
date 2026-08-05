@@ -7,7 +7,7 @@ setup(
         "DFIR-IRIS processor module: sends customer-ready investigation "
         "reports by email directly from a case (hook 'Send customer report')."
     ),
-    author="SOC Engineering",
+    author="Niklas Thürnau",
     license="Apache-2.0",
     classifiers=[
         "License :: OSI Approved :: Apache Software License",

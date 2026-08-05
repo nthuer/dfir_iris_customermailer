@@ -105,7 +105,7 @@ iris_customer_case_mailer_module/
         ├── blueprint.py               # send dialog (Flask blueprint)
         └── templates/dialog.html      # dialog frontend (vanilla JS)
 examples/mail_templates/standard_customer_mail.html
-tests/                                 # 50 unit/flow tests (run without IRIS)
+tests/                                 # 63 unit/flow tests (run without IRIS)
 ```
 
 ## Installation
@@ -365,7 +365,7 @@ This project is licensed under the **Apache License, Version 2.0** –
 see the [LICENSE](LICENSE) file for the full license text.
 
 ```
-Copyright 2026 SOC Engineering
+Copyright 2026 Niklas Thürnau
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
