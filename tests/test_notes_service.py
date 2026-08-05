@@ -28,7 +28,7 @@ def service(raw_config, fake_adapter):
 
 @pytest.fixture
 def case_ctx(fake_adapter):
-    return fake_adapter.get_case_context(1, "contact_emails")
+    return fake_adapter.get_case_context(1)
 
 
 @pytest.fixture

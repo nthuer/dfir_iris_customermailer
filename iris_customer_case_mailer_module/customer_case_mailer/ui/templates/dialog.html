@@ -49,9 +49,10 @@
 
 <div class="card">
   <h2>Recipients (determined server-side, not editable)</h2>
-  <label>To (from customer attribute)</label>
+  <label>To (customer contacts with role <span id="roleLabel">CISO</span>)</label>
   <div class="chips" id="toChips"></div>
   <div class="error" id="toError"></div>
+  <div class="error" id="skippedInfo"></div>
   <label>CC (module configuration)</label>
   <div class="chips" id="ccChips"></div>
   <label>BCC (module configuration)</label>
@@ -158,10 +159,14 @@
         (state.case_name || ("Case #" + cid)) +
         (state.customer ? " (" + state.customer + ")" : "");
       el("testWarn").hidden = !state.test_mode_enabled;
+      el("roleLabel").textContent = (state.contact_roles || ["CISO"]).join(", ");
       chips(el("toChips"), state.to);
       chips(el("ccChips"), state.cc);
       chips(el("bccChips"), state.bcc);
       el("toError").textContent = state.recipient_error || "";
+      el("skippedInfo").textContent = (state.skipped_invalid || []).length
+        ? "Skipped contacts (invalid email address): " + state.skipped_invalid.join(", ")
+        : "";
       if (state.test_mode_enabled) {
         el("testInfo").textContent =
           "Effective recipients in test mode: " + (state.test_mode_recipients || []).join(", ");

@@ -4,7 +4,10 @@ import pytest
 
 from iris_customer_case_mailer_module.customer_case_mailer.config_service import load_config
 from iris_customer_case_mailer_module.customer_case_mailer.errors import TemplateRenderError
-from iris_customer_case_mailer_module.customer_case_mailer.models import CaseContext
+from iris_customer_case_mailer_module.customer_case_mailer.models import (
+    CaseContext,
+    CustomerContact,
+)
 from iris_customer_case_mailer_module.customer_case_mailer.template_service import (
     TemplateService,
 )
@@ -20,7 +23,8 @@ def context():
     return CaseContext(
         case_id=1, name="Case <Alpha>", description="Description",
         open_date="2026-07-01", soc_id="SOC-1",
-        customer_name="ACME Corp", contact_emails_raw="x@example.org",
+        customer_name="ACME Corp",
+        contacts=[CustomerContact("Jane Doe", "ciso@example.org", "CISO")],
     ).template_context()
 
 

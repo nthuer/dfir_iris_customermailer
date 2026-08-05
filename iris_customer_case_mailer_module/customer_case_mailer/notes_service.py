@@ -65,6 +65,10 @@ def build_note_content(timestamp: datetime,
             f"- **CC:** {_fmt_list(recipients.cc)}",
             f"- **BCC:** {_fmt_list(recipients.bcc)}",
         ]
+        if recipients.skipped_invalid:
+            lines.append(
+                "- **Skipped contacts (invalid email address):** "
+                f"{_fmt_list(recipients.skipped_invalid)}")
         if recipients.test_mode_active:
             lines += [
                 "- **Test mode:** active – production recipients were replaced",

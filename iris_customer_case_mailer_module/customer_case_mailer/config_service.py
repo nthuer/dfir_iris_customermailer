@@ -132,6 +132,8 @@ def load_config(raw: Optional[Dict[str, Any]]) -> MailerConfig:
     if password and not username:
         raise ConfigError("'smtp_password' is set, but 'smtp_username' is missing.")
 
+    contact_roles = _csv_list(raw.get("customer_contact_roles")) or ["CISO"]
+
     return MailerConfig(
         smtp_host=_require(raw, "smtp_host"),
         smtp_port=_as_int(raw.get("smtp_port"), "smtp_port"),
@@ -145,7 +147,7 @@ def load_config(raw: Optional[Dict[str, Any]]) -> MailerConfig:
         default_bcc=_validated_address_list(_as_str(raw.get("default_bcc")), "default_bcc"),
         test_mode_enabled=test_mode_enabled,
         test_mode_recipients=test_recipients,
-        customer_email_attribute=_as_str(raw.get("customer_email_attribute")) or "contact_emails",
+        customer_contact_roles=contact_roles,
         notes_directory_name=_as_str(raw.get("notes_directory_name")) or "Communication",
         default_subject_template=_require(raw, "default_subject_template"),
         allowed_report_formats=allowed_formats,

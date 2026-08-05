@@ -24,6 +24,7 @@ from iris_customer_case_mailer_module.customer_case_mailer.mailer import (  # no
 )
 from iris_customer_case_mailer_module.customer_case_mailer.models import (  # noqa: E402
     CaseContext,
+    CustomerContact,
 )
 
 MAIL_TEMPLATE = """<html><body>
@@ -36,13 +37,24 @@ MAIL_TEMPLATE = """<html><body>
 BROKEN_TEMPLATE = "<html>{{ case.does_not_exist }}</html>"
 
 
+def contact(name: str, email: str, role: str = "CISO") -> CustomerContact:
+    """Shorthand for building customer contacts in tests."""
+    return CustomerContact(name=name, email=email, role=role)
+
+
+DEFAULT_CONTACTS = [
+    contact("Jane Doe", "ciso@example.org", "CISO"),
+    contact("John Ops", "soc-lead@example.org", "SOC Lead"),
+]
+
+
 class FakeAdapter:
     """In-memory replacement for IrisAdapter."""
 
     def __init__(self,
-                 contact_emails: Optional[str] = "customer@example.org",
+                 contacts: Optional[List[CustomerContact]] = None,
                  customer_name: Optional[str] = "ACME Corp"):
-        self.contact_emails = contact_emails
+        self.contacts = list(DEFAULT_CONTACTS if contacts is None else contacts)
         self.customer_name = customer_name
         self.report_templates = [
             {"id": 1, "name": "Standard Investigation", "description": "", "format": "docx"},
@@ -60,7 +72,7 @@ class FakeAdapter:
         self.fail_datastore = False
 
     # ---- Case ----
-    def get_case_context(self, case_id: int, email_attribute: str) -> CaseContext:
+    def get_case_context(self, case_id: int) -> CaseContext:
         return CaseContext(
             case_id=case_id,
             name="Ransomware investigation",
@@ -69,8 +81,11 @@ class FakeAdapter:
             soc_id="SOC-2026-0042",
             customer_name=self.customer_name,
             customer_attributes={},
-            contact_emails_raw=self.contact_emails,
+            contacts=list(self.contacts),
         )
+
+    def get_customer_contacts(self, client_id: int) -> List[CustomerContact]:
+        return list(self.contacts)
 
     def get_user_display(self, user_id):
         return f"analyst (id {user_id})"
@@ -148,7 +163,7 @@ def raw_config(mail_templates_dir):
         "default_bcc": "archive@example.org",
         "test_mode_enabled": False,
         "test_mode_recipients": "test@example.org",
-        "customer_email_attribute": "contact_emails",
+        "customer_contact_roles": "CISO",
         "notes_directory_name": "Communication",
         "default_subject_template": "Report – {{ case.name }} ({{ case.soc_id }})",
         "allowed_report_formats": "docx,html",

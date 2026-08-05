@@ -9,8 +9,10 @@ ONLY this file):
 - Modules run inside the IRIS process (webapp/worker) and may import
   ``app.*``.
 - ``app.models.cases.Cases`` with fields name, description, open_date,
-  soc_id, client_id; the customer is ``app.models.models.Client`` with
-  ``custom_attributes`` (JSON, structure: {Tab: {Field: {value: ...}}}).
+  soc_id, client_id; the customer is ``app.models.models.Client``.
+- Customer contacts: ``app.models.models.Contact`` (table ``contact``)
+  with ``client_id``, ``contact_name``, ``contact_email`` and the
+  free-text field ``contact_role`` ("Contact Role" in the IRIS UI).
 - Report templates: ``app.models.models.CaseTemplateReport`` +
   ``ReportType`` (name "Investigation"); format detection via the file
   extension of the stored template.
@@ -33,36 +35,12 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from .errors import AdapterError, AttachmentError, NotesError, ReportRenderError
-from .models import CaseContext
+from .models import CaseContext, CustomerContact
 
 MODULE_NAME = "IrisCustomerCaseMailer"
 
 _DOCX_EXT = (".docx",)
 _HTML_EXT = (".html", ".htm", ".md")
-
-
-def _extract_custom_attribute(custom_attributes: Any, attribute_name: str) -> Optional[str]:
-    """Looks up a custom attribute in the (possibly nested) IRIS structure.
-
-    IRIS stores custom attributes as ``{Tab: {Field: {"value": ...}}}``.
-    Flat dicts (``{Field: value}``) are supported additionally.
-    """
-    if not isinstance(custom_attributes, dict):
-        return None
-    # Flat structure
-    if attribute_name in custom_attributes:
-        value = custom_attributes[attribute_name]
-        if isinstance(value, dict):
-            value = value.get("value")
-        return None if value is None else str(value)
-    # Nested via tabs
-    for tab in custom_attributes.values():
-        if isinstance(tab, dict) and attribute_name in tab:
-            field = tab[attribute_name]
-            if isinstance(field, dict):
-                field = field.get("value")
-            return None if field is None else str(field)
-    return None
 
 
 class IrisAdapter:
@@ -102,7 +80,7 @@ class IrisAdapter:
 
     # ------------------------------------------------------------------- case
 
-    def get_case_context(self, case_id: int, email_attribute: str) -> CaseContext:
+    def get_case_context(self, case_id: int) -> CaseContext:
         cases_mod = self._import("app.models.cases")
         models = self._import("app.models.models")
 
@@ -116,14 +94,14 @@ class IrisAdapter:
             customer = (self._db_session().query(models.Client)
                         .filter(models.Client.client_id == case.client_id).first())
 
-        contact_raw = None
         customer_name = None
         customer_attrs: Dict = {}
+        contacts: List[CustomerContact] = []
         if customer is not None:
             customer_name = getattr(customer, "name", None)
             raw_attrs = getattr(customer, "custom_attributes", None) or {}
             customer_attrs = raw_attrs if isinstance(raw_attrs, dict) else {}
-            contact_raw = _extract_custom_attribute(customer_attrs, email_attribute)
+            contacts = self.get_customer_contacts(customer.client_id)
 
         open_date = getattr(case, "open_date", None)
         if isinstance(open_date, datetime):
@@ -139,8 +117,28 @@ class IrisAdapter:
             soc_id=getattr(case, "soc_id", "") or "",
             customer_name=customer_name,
             customer_attributes=customer_attrs,
-            contact_emails_raw=contact_raw,
+            contacts=contacts,
         )
+
+    def get_customer_contacts(self, client_id: int) -> List[CustomerContact]:
+        """All contacts configured on a customer (IRIS: Customer -> Contacts)."""
+        models = self._import("app.models.models")
+        contact_cls = getattr(models, "Contact", None)
+        if contact_cls is None:
+            raise AdapterError(
+                "IRIS model 'Contact' not found – customer contacts require "
+                "IRIS >= 2.4.")
+
+        rows = (self._db_session().query(contact_cls)
+                .filter(contact_cls.client_id == client_id).all())
+        return [
+            CustomerContact(
+                name=(getattr(row, "contact_name", "") or "").strip(),
+                email=(getattr(row, "contact_email", "") or "").strip(),
+                role=(getattr(row, "contact_role", "") or "").strip(),
+            )
+            for row in rows
+        ]
 
     def get_user_display(self, user_id: Optional[int]) -> str:
         if user_id is None:

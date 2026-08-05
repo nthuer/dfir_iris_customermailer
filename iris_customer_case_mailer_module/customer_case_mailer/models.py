@@ -27,7 +27,7 @@ class MailerConfig:
     default_bcc: List[str]
     test_mode_enabled: bool
     test_mode_recipients: List[str]
-    customer_email_attribute: str
+    customer_contact_roles: List[str]     # contact roles addressed, e.g. ["CISO"]
     notes_directory_name: str
     default_subject_template: str
     allowed_report_formats: List[str]
@@ -43,13 +43,37 @@ class MailerConfig:
         """All values that must never appear in logs/notes."""
         return [s for s in (self.smtp_password,) if s]
 
+    def contact_roles_label(self) -> str:
+        """Human-readable role list for error messages."""
+        return ", ".join(self.customer_contact_roles)
+
+
+@dataclass(frozen=True)
+class CustomerContact:
+    """A contact configured on an IRIS customer (IRIS model ``Contact``).
+
+    ``role`` maps to the free-text field "Contact Role" in the IRIS UI;
+    recipients are selected by matching it against
+    ``MailerConfig.customer_contact_roles``.
+    """
+
+    name: str
+    email: str
+    role: str
+
+    def display(self) -> str:
+        """Readable identification for notes and error messages."""
+        name = self.name.strip() or "unnamed contact"
+        return f"{name} <{self.email.strip()}>" if self.email.strip() else name
+
 
 @dataclass(frozen=True)
 class CaseContext:
     """Case and customer data for templates, reports and notes.
 
     ``customer_name`` is None when no customer is assigned to the case.
-    ``contact_emails_raw`` is None when the custom attribute is missing.
+    ``contacts`` holds all contacts configured on that customer; the
+    recipient service picks the ones carrying the configured role.
     """
 
     case_id: int
@@ -59,7 +83,7 @@ class CaseContext:
     soc_id: str
     customer_name: Optional[str]
     customer_attributes: Dict = field(default_factory=dict)
-    contact_emails_raw: Optional[str] = None
+    contacts: List[CustomerContact] = field(default_factory=list)
 
     def template_context(self) -> Dict:
         """Context for mail/subject templates.
@@ -77,6 +101,10 @@ class CaseContext:
                 "customer": {
                     "name": self.customer_name or "",
                     "attributes": self.customer_attributes,
+                    "contacts": [
+                        {"name": c.name, "email": c.email, "role": c.role}
+                        for c in self.contacts
+                    ],
                 },
             }
         }
@@ -90,6 +118,9 @@ class ResolvedRecipients:
     cc: List[str]
     bcc: List[str]
     test_mode_active: bool = False
+    # Contacts carrying the configured role whose email address was
+    # invalid and therefore skipped – documented in the note and the UI.
+    skipped_invalid: List[str] = field(default_factory=list)
     # Original (production) recipients – only relevant for documentation
     # in the note when test mode has replaced them.
     original_to: List[str] = field(default_factory=list)

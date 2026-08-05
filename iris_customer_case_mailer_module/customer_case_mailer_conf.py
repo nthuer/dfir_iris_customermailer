@@ -115,10 +115,12 @@ module_configuration = [
         "type": "string",
     },
     {
-        "param_name": "customer_email_attribute",
-        "param_human_name": "Customer attribute for recipients",
-        "param_description": "Name of the customer custom attribute holding the To addresses (CSV).",
-        "default": "contact_emails",
+        "param_name": "customer_contact_roles",
+        "param_human_name": "Customer contact roles (CSV)",
+        "param_description": ("Contact roles that receive the report. Matched against the "
+                              "'Contact Role' field of the customer contacts, "
+                              "case-insensitive and exact. Default: CISO."),
+        "default": "CISO",
         "mandatory": True,
         "type": "string",
     },

@@ -3,10 +3,12 @@
 DFIR-IRIS **processor module** (`customer_case_mailer`) for IRIS **>= 2.4.27**.
 
 Analysts send a customer-ready **investigation report by email**
-directly from a case – without leaving IRIS. Every send attempt
-(success or failure) is automatically documented as a **note in the
-`Communication` directory**, including the actually sent report as a
-file.
+directly from a case – without leaving IRIS. Recipients are derived
+from the **contacts configured on the customer**: everyone whose
+contact role is **CISO** and who has an email address. Every send
+attempt (success or failure) is automatically documented as a **note in
+the `Communication` directory**, including the actually sent report as
+a file.
 
 ---
 
@@ -16,7 +18,7 @@ file.
 - [Architecture & data flow](#architecture--data-flow)
 - [Project structure](#project-structure)
 - [Installation](#installation)
-- [Customer extension (`contact_emails`)](#customer-extension-contact_emails)
+- [Customer contacts (CISO)](#customer-contacts-ciso)
 - [Module configuration](#module-configuration)
 - [Mail templates](#mail-templates)
 - [Usage (dialog & hook)](#usage-dialog--hook)
@@ -64,8 +66,8 @@ Hook layer (IrisCustomerCaseMailerInterface)        UI layer (ui/blueprint.py + 
               CustomerCaseMailer (mailer.py, orchestrator)
                         │
    1. config_service    │  loads/validates the module configuration
-   2. iris_adapter      │  loads case + customer + contact_emails
-   3. recipient_service │  parse CSV, trim, validate, dedupe,
+   2. iris_adapter      │  loads case + customer + customer contacts
+   3. recipient_service │  pick contacts with role CISO, validate, dedupe,
                         │  merge CC/BCC, apply test mode
    4. template_service  │  render subject + HTML mail body (Jinja2, sandboxed)
    5. report_service    │  render investigation report (docx/html)
@@ -138,33 +140,37 @@ tests/                                 # 50 unit/flow tests (run without IRIS)
    docker compose restart app worker
    ```
 
-## Customer extension (`contact_emails`)
+## Customer contacts (CISO)
 
-The module reads the `To` recipients from a **customer custom
-attribute** with the fixed name `contact_emails` (CSV string):
+The module derives the `To` recipients from the **contacts configured
+on the customer** – no custom attribute is required.
 
-```
-customer1@example.org,customer2@example.org
-```
+Setup in IRIS: *Customers → \<customer\> → Contacts → Add contact* and
+fill in at least:
 
-Setup in IRIS: *Advanced → Custom Attributes → Client* → add the
-attribute `contact_emails` (type text/input), e.g.:
+| Field | Value |
+|---|---|
+| **Contact name** | e.g. `Jane Doe` |
+| **Contact role** | `CISO` |
+| **Contact email** | e.g. `jane.doe@customer.example` |
 
-```json
-{
-    "Contact": {
-        "contact_emails": {
-            "type": "input_string",
-            "mandatory": false,
-            "value": ""
-        }
-    }
-}
-```
+Every contact of that customer whose **Contact role** is `CISO` and
+that has an email address receives the report. Multiple CISO contacts
+are supported – all of them are addressed.
 
-Then maintain the recipient addresses on every customer. The attribute
-name is configurable via `customer_email_attribute`; the default is
-`contact_emails`.
+Details of the matching:
+
+- Role matching is **case-insensitive and whitespace-trimmed, but
+  exact**: `CISO`, `ciso` and `  CISO  ` match, `Deputy CISO` does not.
+- To address additional roles, extend the configuration parameter
+  `customer_contact_roles`, e.g. `CISO, Deputy CISO`.
+- Contacts **without** an email address are skipped silently (they are
+  simply not recipients).
+- Contacts with an **invalid** email address are skipped as well; the
+  remaining valid CISO contacts still receive the mail, and the skipped
+  ones are listed in the dialog and in the documentation note.
+- If **no** CISO contact with a valid email address exists, the send is
+  blocked with an error and a `FAILED` note is created.
 
 ## Module configuration
 
@@ -182,7 +188,7 @@ name is configurable via `customer_email_attribute`; the default is
 | `default_bcc` | CSV | no | – | fixed BCC, visible in the dialog |
 | `test_mode_enabled` | bool | yes | false | see test mode |
 | `test_mode_recipients` | CSV | no* | – | *mandatory when test mode is on |
-| `customer_email_attribute` | string | yes | `contact_emails` | source of the To addresses |
+| `customer_contact_roles` | CSV | yes | `CISO` | contact roles that receive the report |
 | `notes_directory_name` | string | yes | `Communication` | notes directory |
 | `default_subject_template` | string | yes | `Investigation Report – {{ case.name }} ({{ case.soc_id }})` | subject template |
 | `allowed_report_formats` | CSV | yes | `docx,html` | only `docx`/`html` |
@@ -211,7 +217,9 @@ understandable error message.
     (IRIS data model: `Cases.client → Client.name`); template
     compatibility is preserved.
   - Additionally available: `case.customer.name`,
-    `case.customer.attributes` (all customer custom attributes).
+    `case.customer.attributes` (customer custom attributes) and
+    `case.customer.contacts` (list of all customer contacts with
+    `name`, `email` and `role` – e.g. for a personalised salutation).
 - Rendering is **sandboxed** with `StrictUndefined` (missing variables
   ⇒ hard error) and **autoescape** (case data cannot inject HTML/JS).
 - The subject is rendered from `default_subject_template` and can be
@@ -243,13 +251,18 @@ note documents the originally intended production recipients.
 
 ## Recipient logic
 
-1. `To` = customer attribute `contact_emails`, split by `,`.
-2. Whitespace trimmed, empty values removed.
-3. Every address validated (To, CC and BCC) – **a single invalid
-   address blocks the send**.
-4. Deduplicated case-insensitively (first spelling wins).
-5. `CC`/`BCC` exclusively from the module configuration.
-6. Recipients are assembled **server-side and final** – the dialog only
+1. `To` = all contacts of the case customer whose **Contact role**
+   matches `customer_contact_roles` (default `CISO`).
+2. Role matching is case-insensitive and trimmed, but exact.
+3. Contacts without an email address are skipped silently.
+4. Contacts with an invalid email address are skipped and reported;
+   the remaining valid contacts still receive the mail.
+5. If no contact with the configured role has a valid email address,
+   the send is **blocked**.
+6. Deduplicated case-insensitively (first spelling wins).
+7. `CC`/`BCC` exclusively from the module configuration; an invalid
+   address there **blocks** the send (it is a configuration error).
+8. Recipients are assembled **server-side and final** – the dialog only
    displays them, frontend input for recipients is ignored.
 
 ## Notes / documentation
@@ -260,7 +273,8 @@ After **every** send attempt exactly one note is created in the
 - Title on success: `Customer mail YYYY-MM-DD HH:MM – <Customer>`
 - Title on failure: `FAILED – Customer mail YYYY-MM-DD HH:MM – <Customer>`
 - Content: timestamp, final To/CC/BCC, final subject, analyst identity,
-  rendered mail body, error details if any.
+  rendered mail body, skipped contacts with invalid email addresses,
+  and error details if any.
 - The actually sent report is stored as a **real file** in the case
   **datastore** and linked inside the note (IRIS notes have no native
   attachment field; the datastore is the IRIS-conformant location for
@@ -270,11 +284,17 @@ After **every** send attempt exactly one note is created in the
 ## Error behaviour
 
 Cleanly handled cases (each with a UI message **and** a failure note):
-no customer on the case · `contact_emails` missing/empty · invalid
-address in To/CC/BCC · report/mail template not renderable (**hard
-blocker**) · SMTP unreachable · authentication failed · TLS error ·
-timeout · note directory/note not creatable · attachment not storable
-(documented inside the note, does not abort the documentation).
+no customer on the case · customer without any contacts · no contact
+with role `CISO` · no CISO contact with an email address · no CISO
+contact with a *valid* email address · invalid address in CC/BCC ·
+report/mail template not renderable (**hard blocker**) · SMTP
+unreachable · authentication failed · TLS error · timeout · note
+directory/note not creatable · attachment not storable (documented
+inside the note, does not abort the documentation).
+
+Individual CISO contacts with an invalid email address do **not** fail
+the send: they are skipped, the remaining valid contacts receive the
+report, and the skipped ones are listed in the dialog and in the note.
 
 Special case: if the note fails **after a successful send**, the result
 stays "sent", but the analyst is explicitly asked to document manually.
@@ -301,14 +321,17 @@ python -m venv .venv
 python -m pytest
 ```
 
-50 tests, runnable without a running IRIS (IRIS access is encapsulated
+63 tests, runnable without a running IRIS (IRIS access is encapsulated
 in the `iris_adapter` and replaced by an in-memory fake in the tests).
-Covered among others: single/multiple CSV recipients, trim/dedupe,
-invalid addresses, SMTP with/without auth, TLS on/off, test mode
-override, mail template rendering with `case.*`, report rendering
-DOCX/HTML, mail/report preview, automatic directory creation, one note
-per send, attachment on the note, failure note on failed send, hard
-template errors.
+Covered among others: single/multiple CISO contacts, contacts with
+other roles being ignored, case-insensitive/exact role matching,
+configurable roles, contacts without email skipped, invalid contact
+email skipped and reported, no CISO contact blocking the send,
+trim/dedupe, SMTP with/without auth, TLS on/off, test mode override,
+mail template rendering with `case.*`, report rendering DOCX/HTML,
+mail/report preview, automatic directory creation, one note per send,
+attachment on the note, failure note on failed send, hard template
+errors.
 
 ## Assumptions & limitations
 
@@ -322,14 +345,18 @@ All IRIS-specific assumptions are marked in the code and located
    (`/customer_case_mailer/…`). This is a deliberate, documented
    extension point outside the official module API; if registration
    fails, the hook send with defaults remains usable.
-2. **Reporter signatures:** `IrisMakeDocReport`/`IrisMakeMdReport`
+2. **Customer contacts:** read from the IRIS model
+   `app.models.models.Contact` (table `contact`) via `client_id`, using
+   the fields `contact_name`, `contact_email` and `contact_role`
+   ("Contact Role" in the IRIS UI, a free-text field).
+3. **Reporter signatures:** `IrisMakeDocReport`/`IrisMakeMdReport`
    vary between minor versions; the adapter uses feature detection.
    On deviations adapt only the adapter.
-3. **Note attachment:** realised as a datastore file + link inside the
+4. **Note attachment:** realised as a datastore file + link inside the
    note (IRIS-conformant, since notes have no native attachments).
-4. **HTML report preview** opens in a new tab; the DOCX preview is
+5. **HTML report preview** opens in a new tab; the DOCX preview is
    delivered as a download (browsers cannot render DOCX natively).
-5. After installation/configuration changes a **restart of the IRIS
+6. After installation/configuration changes a **restart of the IRIS
    services** may be required (hook/blueprint registration).
 
 ## License

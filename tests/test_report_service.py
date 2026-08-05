@@ -9,7 +9,7 @@ from iris_customer_case_mailer_module.customer_case_mailer.report_service import
 
 @pytest.fixture
 def case_ctx(fake_adapter):
-    return fake_adapter.get_case_context(1, "contact_emails")
+    return fake_adapter.get_case_context(1)
 
 
 @pytest.fixture

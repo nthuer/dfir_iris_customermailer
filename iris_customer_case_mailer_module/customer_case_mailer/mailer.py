@@ -3,8 +3,9 @@
 Data flow of a send attempt (``send``):
 
     1. Load/validate config              (config_service)
-    2. Load case + customer + attribute  (iris_adapter)
+    2. Load case + customer + contacts   (iris_adapter)
     3. Resolve/validate recipients       (recipient_service)
+       (contacts with role CISO that carry a valid email address)
     4. Render subject + mail body        (template_service)   -> hard errors
     5. Render investigation report       (report_service)     -> hard errors
     6. Send mail via SMTP                (smtp_service)
@@ -51,8 +52,7 @@ class CustomerCaseMailer:
     # ------------------------------------------------------------------ intern
 
     def _case_context(self, case_id: int) -> CaseContext:
-        return self.adapter.get_case_context(
-            case_id, self.config.customer_email_attribute)
+        return self.adapter.get_case_context(case_id)
 
     def _require_customer(self, ctx: CaseContext) -> None:
         if not ctx.customer_name:
@@ -62,7 +62,7 @@ class CustomerCaseMailer:
     def _resolve(self, ctx: CaseContext,
                  force_test_send: bool) -> ResolvedRecipients:
         self._require_customer(ctx)
-        return resolve_recipients(ctx.contact_emails_raw, self.config,
+        return resolve_recipients(ctx.contacts, self.config,
                                   force_test_send=force_test_send)
 
     def _final_subject(self, ctx: CaseContext,
@@ -93,6 +93,7 @@ class CustomerCaseMailer:
             "test_mode_recipients": self.config.test_mode_recipients,
             "cc": self.config.default_cc,
             "bcc": self.config.default_bcc,
+            "contact_roles": self.config.customer_contact_roles,
             "mail_templates": self.templates.list_mail_templates(),
             "report_templates": self.reports.list_templates(),
             "report_formats": self.config.allowed_report_formats,
@@ -101,6 +102,7 @@ class CustomerCaseMailer:
             "default_report_format": self.config.default_report_format,
             "recipients_valid": False,
             "to": [],
+            "skipped_invalid": [],
             "recipient_error": None,
             "default_subject": None,
             "subject_error": None,
@@ -113,6 +115,7 @@ class CustomerCaseMailer:
             state["effective_to"] = recipients.to
             state["effective_cc"] = recipients.cc
             state["effective_bcc"] = recipients.bcc
+            state["skipped_invalid"] = recipients.skipped_invalid
             state["recipients_valid"] = True
         except MailerError as exc:
             state["recipient_error"] = exc.user_message
