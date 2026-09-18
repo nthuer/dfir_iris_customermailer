@@ -1,16 +1,23 @@
-"""Notes service: documents every send attempt as a case note.
+"""Notes service: documents every preview and every send attempt as a note.
+
+The note is the analyst's feedback channel: IRIS only answers a manual
+hook with "Queued task", so results and errors become visible in the
+case as notes.
 
 Rules:
-- After EVERY send attempt (success or failure) exactly one note is
-  created.
+- Every send attempt (success or failure) creates exactly one note.
+  Every preview creates exactly one note as well.
 - Stored in the note directory ``Communication`` (configurable); the
   directory is created automatically when missing.
-- The actually sent report is stored as a real file (IRIS datastore)
-  and linked in the note. IRIS notes have no native attachment field;
-  the datastore is the IRIS-conformant location for files on a case –
-  the note references the datastore entry with the usual DSF link.
-- No separate status field: success/failure is only recognisable via
-  the title prefix ``FAILED – `` and the content.
+- The rendered report is stored as a real file in the IRIS datastore
+  and linked in the note (IRIS notes have no native attachment field).
+- Titles (IRIS limits note titles to 155 characters):
+    ``Customer mail YYYY-MM-DD HH:MM – <Customer>``                  sent
+    ``FAILED – Customer mail YYYY-MM-DD HH:MM – <Customer>``         send failed
+    ``PREVIEW – Customer mail YYYY-MM-DD HH:MM – <Customer>``        preview
+    ``PREVIEW FAILED – Customer mail YYYY-MM-DD HH:MM – <Customer>`` preview failed
+- No separate status field: the state is recognisable via title and
+  content only.
 - Secrets are masked before writing.
 """
 
@@ -29,20 +36,54 @@ from .models import (
     SendSelection,
 )
 
+KIND_SENT = "sent"
+KIND_FAILED = "failed"
+KIND_PREVIEW = "preview"
+KIND_PREVIEW_FAILED = "preview_failed"
+
+_TITLE_PREFIX = {
+    KIND_SENT: "",
+    KIND_FAILED: "FAILED – ",
+    KIND_PREVIEW: "PREVIEW – ",
+    KIND_PREVIEW_FAILED: "PREVIEW FAILED – ",
+}
+
+_HEADLINE = {
+    KIND_SENT: "Customer mail – sent",
+    KIND_FAILED: "Customer mail – FAILED",
+    KIND_PREVIEW: "Customer mail – PREVIEW (nothing has been sent)",
+    KIND_PREVIEW_FAILED: "Customer mail – PREVIEW FAILED (nothing has been sent)",
+}
+
+IRIS_NOTE_TITLE_MAX = 155
+
+
+def fingerprint_marker(fingerprint: str) -> str:
+    """Line written into preview notes; searched for by the preview gate."""
+    return f"Preview fingerprint: `{fingerprint}`"
+
 
 def build_note_title(timestamp: datetime, customer_name: Optional[str],
-                     success: bool) -> str:
+                     kind: str) -> str:
     stamp = timestamp.strftime("%Y-%m-%d %H:%M")
+    head = f"{_TITLE_PREFIX[kind]}Customer mail {stamp} – "
     customer = customer_name or "Unknown customer"
-    title = f"Customer mail {stamp} – {customer}"
-    return title if success else f"FAILED – {title}"
+    room = IRIS_NOTE_TITLE_MAX - len(head)
+    if len(customer) > room:
+        customer = customer[:room - 1] + "…"
+    return head + customer
+
+
+def preview_title_prefix() -> str:
+    return _TITLE_PREFIX[KIND_PREVIEW]
 
 
 def _fmt_list(values: List[str]) -> str:
     return ", ".join(values) if values else "–"
 
 
-def build_note_content(timestamp: datetime,
+def build_note_content(kind: str,
+                       timestamp: datetime,
                        analyst_display: str,
                        recipients: Optional[ResolvedRecipients],
                        subject: Optional[str],
@@ -50,11 +91,11 @@ def build_note_content(timestamp: datetime,
                        selection: Optional[SendSelection],
                        artifact: Optional[ReportArtifact],
                        attachment_line: str,
-                       success: bool,
+                       fingerprint: Optional[str] = None,
                        error_message: Optional[str] = None) -> str:
     """Builds the markdown content of the note (pure function, testable)."""
     lines = [
-        f"# Customer mail – {'sent' if success else 'FAILED'}",
+        f"# {_HEADLINE[kind]}",
         "",
         f"- **Timestamp:** {timestamp.strftime('%Y-%m-%d %H:%M:%S %Z')}",
         f"- **Analyst:** {analyst_display}",
@@ -81,14 +122,30 @@ def build_note_content(timestamp: datetime,
 
     lines.append(f"- **Subject:** {subject if subject else '–'}")
     if selection is not None:
+        # The rendered artifact knows the template's display name; before
+        # rendering only the configured reference (name or id) is known.
+        report_template = artifact.template_name if artifact else selection.report_template
         lines += [
-            f"- **Mail template:** {selection.mail_template}",
-            f"- **Report template:** {selection.report_template} ({selection.report_format})",
+            f"- **Mail template:** {selection.mail_template or '–'}",
+            f"- **Report template:** {report_template or '–'} "
+            f"({selection.report_format or '–'})",
         ]
     if artifact is not None:
         lines.append(f"- **Report file:** {attachment_line}")
-    elif not success:
+    elif kind in (KIND_FAILED, KIND_PREVIEW_FAILED):
         lines.append("- **Report file:** not generated (error before rendering)")
+    if fingerprint and kind == KIND_PREVIEW:
+        lines.append(f"- {fingerprint_marker(fingerprint)}")
+    elif fingerprint:
+        # Deliberately worded differently: the preview gate only accepts
+        # the marker above, and only in PREVIEW notes.
+        lines.append(f"- **Content fingerprint:** `{fingerprint}` "
+                     "(the preview note with the same fingerprint shows this content)")
+
+    if kind == KIND_PREVIEW:
+        lines += ["", "_Review recipients, subject, mail and report. If everything is "
+                      "correct, run **Send customer report** on this case. Any change to "
+                      "the case data or the send options requires a new preview._"]
 
     if error_message:
         lines += ["", "## Error", "", error_message]
@@ -108,20 +165,29 @@ class NotesService:
         self._adapter = adapter
         self._logger = logger
 
-    def create_send_note(self,
-                         case_ctx: CaseContext,
-                         analyst_id: Optional[int],
-                         analyst_display: str,
-                         recipients: Optional[ResolvedRecipients],
-                         subject: Optional[str],
-                         body_html: Optional[str],
-                         selection: Optional[SendSelection],
-                         artifact: Optional[ReportArtifact],
-                         success: bool,
-                         error_message: Optional[str] = None,
-                         timestamp: Optional[datetime] = None,
-                         ) -> Tuple[int, str]:
-        """Creates exactly one note for this send attempt.
+    def preview_exists(self, case_id: int, fingerprint: str) -> bool:
+        """True if a preview note with exactly this content exists."""
+        return self._adapter.note_exists(
+            case_id=case_id,
+            title_prefix=preview_title_prefix(),
+            content_fragment=fingerprint_marker(fingerprint),
+        )
+
+    def create_note(self,
+                    kind: str,
+                    case_ctx: CaseContext,
+                    analyst_id: Optional[int],
+                    analyst_display: str,
+                    recipients: Optional[ResolvedRecipients],
+                    subject: Optional[str],
+                    body_html: Optional[str],
+                    selection: Optional[SendSelection],
+                    artifact: Optional[ReportArtifact],
+                    fingerprint: Optional[str] = None,
+                    error_message: Optional[str] = None,
+                    timestamp: Optional[datetime] = None,
+                    ) -> Tuple[int, str]:
+        """Creates exactly one note for this preview or send attempt.
 
         Raises :class:`NotesError` when the directory or the note cannot
         be created. A failed file attachment does NOT abort the note –
@@ -165,6 +231,7 @@ class NotesService:
                 )
 
         content = build_note_content(
+            kind=kind,
             timestamp=timestamp,
             analyst_display=analyst_display,
             recipients=recipients,
@@ -173,10 +240,10 @@ class NotesService:
             selection=selection,
             artifact=artifact,
             attachment_line=attachment_line,
-            success=success,
+            fingerprint=fingerprint,
             error_message=mask_secrets(error_message, secrets) if error_message else None,
         )
-        title = build_note_title(timestamp, case_ctx.customer_name, success)
+        title = build_note_title(timestamp, case_ctx.customer_name, kind)
 
         try:
             note_id = self._adapter.add_note(

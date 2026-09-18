@@ -6,10 +6,10 @@ from setuptools import find_packages, setup
 # `iris_customer_case_mailer_module`.
 setup(
     name="iris-customer-case-mailer-module",
-    version="1.0.0",
+    version="1.1.0",
     description=(
         "DFIR-IRIS processor module: sends customer-ready investigation "
-        "reports by email directly from a case (hook 'Send customer report')."
+        "reports by email directly from a case (preview, send and test-send hooks)."
     ),
     long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
@@ -25,10 +25,6 @@ setup(
     packages=find_packages(exclude=["tests", "tests.*"]),
     include_package_data=True,
     package_data={
-        # Send dialog served by the Flask blueprint.
-        "iris_customer_case_mailer_module.customer_case_mailer.ui": [
-            "templates/*.html",
-        ],
         # Default HTML mail templates, so the module is usable right
         # after installation without copying files into the containers.
         "iris_customer_case_mailer_module.customer_case_mailer": [

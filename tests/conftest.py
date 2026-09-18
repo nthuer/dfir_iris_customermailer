@@ -56,6 +56,8 @@ class FakeAdapter:
                  customer_name: Optional[str] = "ACME Corp"):
         self.contacts = list(DEFAULT_CONTACTS if contacts is None else contacts)
         self.customer_name = customer_name
+        self.send_options: Dict[str, str] = {}   # case custom attribute choices
+        self.case_description = "Suspected encryption in the file server cluster."
         self.report_templates = [
             {"id": 1, "name": "Standard Investigation", "description": "", "format": "docx"},
             {"id": 2, "name": "HTML Investigation", "description": "", "format": "html"},
@@ -76,19 +78,20 @@ class FakeAdapter:
         return CaseContext(
             case_id=case_id,
             name="Ransomware investigation",
-            description="Suspected encryption in the file server cluster.",
+            description=self.case_description,
             open_date="2026-07-01",
             soc_id="SOC-2026-0042",
             customer_name=self.customer_name,
             customer_attributes={},
             contacts=list(self.contacts),
+            send_options=dict(self.send_options),
         )
 
     def get_customer_contacts(self, client_id: int) -> List[CustomerContact]:
         return list(self.contacts)
 
-    def get_user_display(self, user_id):
-        return f"analyst (id {user_id})"
+    def current_analyst(self):
+        return 7, "analyst (id 7)"
 
     # ---- Reports ----
     def list_investigation_report_templates(self):
@@ -115,6 +118,10 @@ class FakeAdapter:
                 "note_id": 500 + len(self.notes)}
         self.notes.append(note)
         return note["note_id"]
+
+    def note_exists(self, case_id, title_prefix, content_fragment):
+        return any(n["case_id"] == case_id and n["title"].startswith(title_prefix)
+                   and content_fragment in n["content"] for n in self.notes)
 
     def store_report_in_datastore(self, case_id, filename, content, user_id):
         if self.fail_datastore:

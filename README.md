@@ -1,27 +1,30 @@
 # iris_customer_case_mailer_module
 
-DFIR-IRIS **processor module** (`customer_case_mailer`) for IRIS **>= 2.4.27**.
+DFIR-IRIS **processor module** (`customer_case_mailer`) for IRIS **>= 2.4.27**
+(verified against a live **v2.4.29** installation).
 
 Analysts send a customer-ready **investigation report by email**
 directly from a case – without leaving IRIS. Recipients are derived
 from the **contacts configured on the customer**: everyone whose
-contact role is **CISO** and who has an email address. Every send
-attempt (success or failure) is automatically documented as a **note in
-the `Communication` directory**, including the actually sent report as
-a file.
+contact role is **CISO** and who has an email address. The analyst
+first creates a **preview**, which is stored as a note in the case, and
+then sends exactly that content. Every preview and every send attempt
+is documented as a **note in the `Communication` directory**, including
+the rendered report as a file.
 
 ---
 
 ## Contents
 
 - [Features](#features)
+- [How it works in a case](#how-it-works-in-a-case)
 - [Architecture & data flow](#architecture--data-flow)
 - [Project structure](#project-structure)
 - [Installation](#installation)
 - [Customer contacts (CISO)](#customer-contacts-ciso)
 - [Module configuration](#module-configuration)
+- [Per-case send options](#per-case-send-options)
 - [Mail templates](#mail-templates)
-- [Usage (dialog & hook)](#usage-dialog--hook)
 - [Recipient logic](#recipient-logic)
 - [Notes / documentation](#notes--documentation)
 - [Error behaviour](#error-behaviour)
@@ -34,23 +37,44 @@ a file.
 
 ## Features
 
-- Manual case hook **"Send customer report"** (processor module,
-  `on_manual_trigger_case`).
-- Send dialog with:
-  - preview of the final `To` recipients (not editable),
-  - visible, non-editable `CC`/`BCC` from the module configuration,
-  - prefilled, **editable subject** (Jinja2 template),
-  - selection of **investigation report template**, **report format**
-    (`docx`/`html`) and **HTML mail template**,
-  - mandatory **preview** of mail body and report,
-  - optional **test send**.
+- Three manual case hooks in the case *Processors* menu (⚡ in the case navigation bar):
+  **Preview customer report**, **Send customer report**,
+  **Test send customer report**.
+- **Mandatory preview:** a production send only goes out if a preview
+  note with *exactly* the same content exists (recipients, subject,
+  mail body, templates, format). Any change in between requires a new
+  preview.
 - The report is rendered via the **existing IRIS investigation report
-  templates** and sent as a mail attachment.
-- **Test mode**: mail goes exclusively to configured test recipients,
-  never to production addresses.
-- After **every** send attempt: exactly one note under `Communication`,
-  with the report attached as a real file (IRIS datastore, linked in
-  the note).
+  templates** (DOCX or HTML) and sent as a mail attachment.
+- HTML mail templates with the **same Jinja2 syntax as the IRIS report
+  templates**; a default template ships with the module.
+- Template, report format and subject can be chosen **per case** via
+  case custom attributes, otherwise the module defaults apply.
+- **Test mode / test send:** mail goes exclusively to the configured
+  test recipients, never to production addresses.
+- Every preview and every send attempt produces exactly one note under
+  `Communication`, with the report attached as a real file (IRIS
+  datastore, linked in the note) and the analyst's identity.
+
+## How it works in a case
+
+1. **Processors → Preview customer report.** The module resolves the
+   recipients, renders subject, mail and report, and stores everything
+   as a `PREVIEW – Customer mail …` note. **Nothing is sent.**
+2. The analyst reviews the preview note: To/CC/BCC, subject, the
+   rendered mail body and the attached report.
+3. **Processors → Send customer report.** The module renders again and
+   sends only if the result matches a preview note (same *content
+   fingerprint*). The outcome is stored as a note:
+   `Customer mail …` on success, `FAILED – Customer mail …` otherwise.
+4. Optional: **Processors → Test send customer report** sends the same
+   mail to the configured `test_mode_recipients` only, with the subject
+   prefixed by `[TEST MODE]`. No preview is required for test sends.
+
+> IRIS acknowledges a manual hook in the UI only with *"Queued task"*.
+> The actual result – including every error – appears as a note in the
+> case's `Communication` directory. Refresh the notes after triggering
+> a hook.
 
 ## Architecture & data flow
 
@@ -59,41 +83,43 @@ the `iris_adapter` only** – everything else is testable without a
 running IRIS.
 
 ```
-Hook layer (IrisCustomerCaseMailerInterface)        UI layer (ui/blueprint.py + dialog.html)
-        │  manual hook                                      │  /customer_case_mailer/dialog
-        └───────────────┬───────────────────────────────────┘
-                        ▼
+IRIS case  →  Processors menu  →  manual hook (synchronous, analyst's request)
+                                   │
+              IrisCustomerCaseMailerInterface  (hook layer)
+              hook_actions.run_hook            (hook → action)
+                                   │
               CustomerCaseMailer (mailer.py, orchestrator)
-                        │
+                                   │
    1. config_service    │  loads/validates the module configuration
-   2. iris_adapter      │  loads case + customer + customer contacts
+   2. iris_adapter      │  loads case + customer + contacts + case send options
    3. recipient_service │  pick contacts with role CISO, validate, dedupe,
                         │  merge CC/BCC, apply test mode
    4. template_service  │  render subject + HTML mail body (Jinja2, sandboxed)
    5. report_service    │  render investigation report (docx/html)
-   6. smtp_service      │  build MIME mail, TLS/auth, send
+   6. mailer            │  content fingerprint
+      ├─ preview        │  → PREVIEW note, nothing sent
+      └─ send           │  → preview gate → smtp_service → note
    7. notes_service     │  ensure 'Communication' directory,
                         │  create note, attach report as file
    8. audit_service     │  logging with secret masking (everywhere)
-                        ▼
-                   SendResult → UI / hook task feedback
 ```
 
-If a step fails, the send is aborted, the error is reported to the
-analyst **and** a `FAILED` note is created (best effort) containing all
-data known up to that point.
+If a step fails, nothing is sent and a `FAILED` (or `PREVIEW FAILED`)
+note is created containing all data known up to that point.
 
 ## Project structure
 
 ```
 buildnpush2iris.sh                     # build the wheel + install into IRIS
 Makefile                               # make test / build / install / clean
-setup.py, MANIFEST.in                  # packaging (wheel incl. templates)
+setup.py, MANIFEST.in                  # packaging (wheel incl. mail templates)
 iris_customer_case_mailer_module/
 ├── __init__.py                        # declares __iris_module_interface
-├── IrisCustomerCaseMailerInterface.py # hook layer (processor module)
+├── IrisCustomerCaseMailerInterface.py # hook layer (registers the 3 hooks)
 ├── customer_case_mailer_conf.py       # module metadata + configuration definition
 └── customer_case_mailer/              # domain logic (testable without IRIS)
+    ├── hook_actions.py                # hook names → preview / send / test send
+    ├── mailer.py                      # orchestrator, fingerprint, preview gate
     ├── models.py                      # dataclasses (config, CaseContext, ...)
     ├── errors.py                      # typed error classes
     ├── config_service.py              # config layer
@@ -104,21 +130,24 @@ iris_customer_case_mailer_module/
     ├── notes_service.py               # notes service (Communication, attachment)
     ├── audit_service.py               # error/audit service (secret masking)
     ├── iris_adapter.py                # the ONLY place touching IRIS internals
-    ├── mail_templates/                # default HTML mail templates (shipped)
-    └── ui/
-        ├── blueprint.py               # send dialog (Flask blueprint)
-        └── templates/dialog.html      # dialog frontend (vanilla JS)
-tests/                                 # 71 unit/flow tests (run without IRIS)
+    └── mail_templates/                # default HTML mail templates (shipped)
+tests/                                 # 90 unit/flow tests (run without IRIS)
 ```
 
 ## Installation
 
 Installation follows the usual DFIR-IRIS module flow: build a wheel and
-install it into the IRIS containers, then register the module in the web
-interface.
+install it into the IRIS containers, then register the module.
 
-**Requirements:** a running DFIR-IRIS (>= 2.4.27) deployment, `docker`,
-and `python3` with `wheel` (or `build`) on the host.
+**Requirements**
+
+- a running DFIR-IRIS (>= 2.4.27) deployment,
+- on the host: `docker`, `python3` with `setuptools` and `wheel`
+  (or `build`) – e.g. `python3 -m pip install setuptools wheel`,
+- **at least one Investigation report template in IRIS.** A fresh IRIS
+  installation has none. Upload one under *Advanced → Report
+  templates* with type *Investigation* (IRIS ships a sample in its
+  source: `source/app/templates/docx_reports/iris_report_template.docx`).
 
 ### 1. Clone and install
 
@@ -128,14 +157,13 @@ cd dfir_iris_customermailer
 ./buildnpush2iris.sh -a
 ```
 
-The script builds the wheel, copies it to `/iriswebapp/dependencies/` in
-the containers, installs it with `pip3 install --force-reinstall` and
-restarts them.
+The script builds the wheel, checks that the mail templates are inside,
+copies it to `/iriswebapp/dependencies/` in the containers, installs it
+with `pip3 install --force-reinstall` and restarts the containers.
 
-**Always use `-a`**: it installs into the worker *and* the app
-container. This module needs both – the manual hook runs in the worker,
-the send dialog is served by the app. Without a flag only the worker is
-updated.
+**Always use `-a`** (app *and* worker container). The hooks run
+synchronously inside the **app** container, which the IRIS convention
+only covers with `-a`; without a flag only the worker is updated.
 
 Non-standard container names can be overridden:
 
@@ -143,36 +171,86 @@ Non-standard container names can be overridden:
 IRIS_APP_CONTAINER=my_app IRIS_WORKER_CONTAINER=my_worker ./buildnpush2iris.sh -a
 ```
 
-### 2. Register the module in IRIS
+**On Windows (Git Bash with Docker Desktop):** two additions are needed
+– `PYTHON` pointing to a Python with `setuptools`/`wheel` (there is no
+`python3` on Windows), and `MSYS_NO_PATHCONV=1`, otherwise Git Bash
+rewrites container paths like `/iriswebapp/dependencies` into Windows
+paths:
+
+```bash
+MSYS_NO_PATHCONV=1 PYTHON=/c/path/to/venv/Scripts/python.exe ./buildnpush2iris.sh -a
+```
+
+### 2. Register the module
+
+In the web interface:
 
 1. *Advanced → Modules → Add module*
 2. Module name: `iris_customer_case_mailer_module`
-3. Fill in the configuration (see [Module
-   configuration](#module-configuration); `smtp_host`, `smtp_port` and
-   `smtp_from_address` are mandatory)
-4. **Enable** the module
 
-The hook then shows up inside a case under *Actions → Send customer
-report*.
+The module is **active immediately** after registering. Alternatively,
+without the web interface (same IRIS function the button uses):
 
-### 3. Optional: use your own mail templates
+```bash
+docker exec -w /iriswebapp iriswebapp_app python3 -c "
+from app import app, db
+from app.iris_engine.module_handler.module_handler import register_module
+with app.app_context():
+    print(register_module('iris_customer_case_mailer_module')[1]); db.session.commit()"
+```
 
-The module ships with a default HTML mail template, so it works right
-after installation. To use your own, mount a directory into **both**
-containers and point `mail_templates_dir` at it.
+### 3. Configure
 
-In `/opt/iris-web/docker-compose.yml`, add the volume to the `app` and
-the `worker` service:
+*Advanced → Modules → IrisCustomerCaseMailer*. Everything is
+pre-filled except these three values:
+
+| Parameter | Example |
+|---|---|
+| `smtp_host` | `smtp.example.org` |
+| `smtp_from_address` | `soc@example.org` |
+| `default_report_template` | name or id of an Investigation report template |
+
+Configuration changes take effect on the next hook call – no restart
+needed. For a safe first run, enable `test_mode_enabled` and set
+`test_mode_recipients`: then no mail can reach a customer.
+
+The hooks now appear in every case in the *Processors* menu (⚡). Customers still
+need a CISO contact, see [Customer contacts](#customer-contacts-ciso).
+
+### 4. Optional: own mail templates
+
+The module ships with a default HTML mail template. To use your own,
+mount a directory into **both** containers and point
+`mail_templates_dir` at it.
+
+In the `docker-compose.yml` of your IRIS installation, the `app` and
+`worker` services are defined via `extends` and have no `volumes:` key
+yet – add one to each (Compose merges it with the base definition):
 
 ```yaml
+  app:
+    extends:
+      file: docker-compose.base.yml
+      service: app
+    image: ...                      # keep the existing line
+    volumes:
+      - "./docker/mail_templates:/opt/iris/mail_templates:ro"
+
+  worker:
+    extends:
+      file: docker-compose.base.yml
+      service: worker
+    image: ...                      # keep the existing line
+    volumes:
       - "./docker/mail_templates:/opt/iris/mail_templates:ro"
 ```
 
-Then restart IRIS and set `mail_templates_dir` to
-`/opt/iris/mail_templates` in the module configuration:
+Put your `.html` templates into `docker/mail_templates/` next to the
+compose file, recreate the containers and set `mail_templates_dir` to
+`/opt/iris/mail_templates`:
 
 ```bash
-cd /opt/iris-web && docker compose down && docker compose up -d
+docker compose up -d
 ```
 
 ### Updating
@@ -185,8 +263,15 @@ git pull
 ./buildnpush2iris.sh -a
 ```
 
-If the set of configuration parameters changed, remove and re-add the
-module in *Advanced → Modules* so IRIS picks up the new definition.
+If the release changes hooks or configuration parameters (see the
+release notes), remove the module in *Advanced → Modules* and add it
+again, so IRIS registers the new hooks and parameter definitions. Note
+down your configuration values first – they are reset to the defaults.
+
+**Upgrading from 1.0.0 to 1.1.0 requires this step:** the send dialog
+was replaced by the preview/send/test-send hooks, and the parameter
+`manual_hook_sends_with_defaults` was replaced by
+`require_preview_before_send`.
 
 ## Customer contacts (CISO)
 
@@ -216,9 +301,9 @@ Details of the matching:
   simply not recipients).
 - Contacts with an **invalid** email address are skipped as well; the
   remaining valid CISO contacts still receive the mail, and the skipped
-  ones are listed in the dialog and in the documentation note.
-- If **no** CISO contact with a valid email address exists, the send is
-  blocked with an error and a `FAILED` note is created.
+  ones are listed in the preview and send notes.
+- If **no** CISO contact with a valid email address exists, nothing is
+  sent and a `FAILED` note is created.
 
 ## Module configuration
 
@@ -232,10 +317,10 @@ Details of the matching:
 | `smtp_from_address` | string | yes | – | sender address |
 | `smtp_from_name` | string | no | – | sender name |
 | `smtp_timeout_seconds` | int | no | 30 | connect/send timeout |
-| `default_cc` | CSV | no | – | fixed CC, visible in the dialog |
-| `default_bcc` | CSV | no | – | fixed BCC, visible in the dialog |
-| `test_mode_enabled` | bool | yes | false | see test mode |
-| `test_mode_recipients` | CSV | no* | – | *mandatory when test mode is on |
+| `default_cc` | CSV | no | – | fixed CC for every customer mail |
+| `default_bcc` | CSV | no | – | fixed BCC for every customer mail |
+| `test_mode_enabled` | bool | yes | false | send only to the test recipients |
+| `test_mode_recipients` | CSV | no* | – | *mandatory when test mode is on; also used by the test-send hook |
 | `customer_contact_roles` | CSV | yes | `CISO` | contact roles that receive the report |
 | `notes_directory_name` | string | yes | `Communication` | notes directory |
 | `default_subject_template` | string | yes | `Investigation Report – {{ case.name }} ({{ case.soc_id }})` | subject template |
@@ -243,22 +328,48 @@ Details of the matching:
 | `allowed_report_templates` | CSV | no | – | names/ids; empty = all |
 | `allowed_mail_templates` | CSV | no | – | file names; empty = all |
 | `mail_templates_dir` | string | no | – | own HTML mail templates; empty ⇒ the ones shipped with the module |
-| `default_mail_template` | string | no | `standard_customer_mail.html` | preselection/hook send |
-| `default_report_template` | string | no | – | preselection/hook send |
-| `default_report_format` | string | no | `docx` | preselection/hook send |
-| `manual_hook_sends_with_defaults` | bool | no | false | hook sends directly using defaults |
+| `default_mail_template` | string | no | `standard_customer_mail.html` | used unless the case sets its own |
+| `default_report_template` | string | no** | – | **needed unless every case sets its own |
+| `default_report_format` | string | no | `docx` | used unless the case sets its own |
+| `require_preview_before_send` | bool | no | true | production sends need a matching preview note |
 
-The configuration is validated strictly on load (`config_service`);
-invalid values (e.g. a broken CC address) block sending with an
-understandable error message.
+The configuration is validated strictly on every hook call
+(`config_service`); invalid values (e.g. a broken CC address) block
+sending and are reported as a note in the case.
+
+## Per-case send options
+
+By default every case uses the module defaults. To let analysts choose
+per case, add a **case custom attribute** tab. *Advanced → Custom
+Attributes → Case*, add:
+
+```json
+{
+    "Customer report": {
+        "Mail template": {"type": "input_string", "mandatory": false, "value": ""},
+        "Report template": {"type": "input_string", "mandatory": false, "value": ""},
+        "Report format": {"type": "input_select", "mandatory": false, "options": ["docx", "html"], "value": ""},
+        "Mail subject": {"type": "input_string", "mandatory": false, "value": ""}
+    }
+}
+```
+
+The tab name is free; the four **field labels** are what the module
+looks for (case-insensitive, in any tab). Empty fields fall back to the
+module defaults. `Mail subject` replaces the rendered subject as plain
+text. New cases get the tab automatically; to add it to existing cases,
+use the option in IRIS to apply the attributes to existing objects.
+
+Changing any of these fields after a preview invalidates it – run the
+preview again before sending.
 
 ## Mail templates
 
 - A default template (`standard_customer_mail.html`) ships inside the
   wheel and is used when `mail_templates_dir` is empty.
 - To use your own: HTML files (`.html`/`.htm`) in the directory set as
-  `mail_templates_dir` (see [Installation](#installation) step 3);
-  multiple templates are supported and selectable in the dialog.
+  `mail_templates_dir` (see [Installation](#installation) step 4);
+  multiple templates are supported and chosen per case.
 - **Same template syntax as the IRIS report templates** (Jinja2:
   `{{ … }}`, `{% … %}`).
 - Supported variables (at minimum):
@@ -273,32 +384,9 @@ understandable error message.
     `name`, `email` and `role` – e.g. for a personalised salutation).
 - Rendering is **sandboxed** with `StrictUndefined` (missing variables
   ⇒ hard error) and **autoescape** (case data cannot inject HTML/JS).
-- The subject is rendered from `default_subject_template` and can be
-  overridden in the dialog. Multilingualism is handled via the
-  templates themselves (no language logic inside the module).
-
-## Usage (dialog & hook)
-
-**Dialog (primary path):** `https://<iris>/customer_case_mailer/dialog?cid=<case_id>`
-
-The dialog shows To/CC/BCC (read-only), the subject (editable), the
-template/format selection as well as the mandatory preview of mail body
-and report. The **Send** button only becomes active once recipients and
-subject are valid **and both previews have been generated**; any change
-to the selection invalidates the previews. If a test recipient is
-configured (but test mode is not globally enabled), the dialog
-additionally offers an explicit **test send**.
-
-**Hook:** In the case under *Actions → Send customer report*.
-- Default: the hook reports the dialog link as its task result.
-- With `manual_hook_sends_with_defaults=true` the hook sends directly
-  using the configured default templates (headless, e.g. for
-  standardised closing reports).
-
-**Test mode:** With `test_mode_enabled=true` mail is **never** sent to
-production recipients: `To` is replaced by `test_mode_recipients`,
-CC/BCC are dropped, the subject is prefixed with `[TEST MODE]`, and the
-note documents the originally intended production recipients.
+- The subject is rendered from `default_subject_template` unless the
+  case sets `Mail subject`. Multilingualism is handled via the templates
+  themselves (no language logic inside the module).
 
 ## Recipient logic
 
@@ -313,56 +401,75 @@ note documents the originally intended production recipients.
 6. Deduplicated case-insensitively (first spelling wins).
 7. `CC`/`BCC` exclusively from the module configuration; an invalid
    address there **blocks** the send (it is a configuration error).
-8. Recipients are assembled **server-side and final** – the dialog only
-   displays them, frontend input for recipients is ignored.
+8. Recipients are assembled **server-side** on every preview and send –
+   analysts cannot change them, only the customer contacts and the
+   module configuration determine them.
 
 ## Notes / documentation
 
-After **every** send attempt exactly one note is created in the
+Every preview and every send attempt creates exactly one note in the
 `Communication` directory (created automatically when missing):
 
-- Title on success: `Customer mail YYYY-MM-DD HH:MM – <Customer>`
-- Title on failure: `FAILED – Customer mail YYYY-MM-DD HH:MM – <Customer>`
-- Content: timestamp, final To/CC/BCC, final subject, analyst identity,
-  rendered mail body, skipped contacts with invalid email addresses,
-  and error details if any.
-- The actually sent report is stored as a **real file** in the case
-  **datastore** and linked inside the note (IRIS notes have no native
+| Title | Meaning |
+|---|---|
+| `PREVIEW – Customer mail YYYY-MM-DD HH:MM – <Customer>` | preview, nothing sent |
+| `PREVIEW FAILED – Customer mail YYYY-MM-DD HH:MM – <Customer>` | preview could not be rendered |
+| `Customer mail YYYY-MM-DD HH:MM – <Customer>` | mail sent |
+| `FAILED – Customer mail YYYY-MM-DD HH:MM – <Customer>` | send attempt failed, nothing sent |
+
+- Content: timestamp, analyst, final To/CC/BCC, skipped contacts, final
+  subject, mail and report template, the rendered mail body, the
+  content fingerprint and error details if any. Test sends additionally
+  list the production recipients that were **not** contacted.
+- The rendered report is stored as a **real file** in the case
+  **datastore** and linked in the note (IRIS notes have no native
   attachment field; the datastore is the IRIS-conformant location for
   files on a case).
-- No separate status field – success/failure only via title and content.
+- Titles are shortened to IRIS' limit of 155 characters (long customer
+  names are truncated with `…`).
+- No separate status field – the state is visible via title and content
+  only.
 
 ## Error behaviour
 
-Cleanly handled cases (each with a UI message **and** a failure note):
-no customer on the case · customer without any contacts · no contact
-with role `CISO` · no CISO contact with an email address · no CISO
-contact with a *valid* email address · invalid address in CC/BCC ·
-report/mail template not renderable (**hard blocker**) · SMTP
-unreachable · authentication failed · TLS error · timeout · note
-directory/note not creatable · attachment not storable (documented
-inside the note, does not abort the documentation).
+Every failure produces a `FAILED` / `PREVIEW FAILED` note in the case –
+the only feedback channel, since IRIS just shows *"Queued task"*:
+
+- no matching preview for a production send (*"No matching preview
+  found"*) – run the preview (again);
+- incomplete or invalid **module configuration** (e.g. missing
+  `smtp_host`) – the note tells the analyst to contact an IRIS
+  administrator;
+- no customer · customer without contacts · no contact with role
+  `CISO` · no CISO contact with a (valid) email address · invalid
+  address in CC/BCC;
+- no report template selected · report/mail template not renderable
+  (**hard blocker**) · invalid report format;
+- SMTP unreachable · authentication failed · TLS error · timeout.
 
 Individual CISO contacts with an invalid email address do **not** fail
 the send: they are skipped, the remaining valid contacts receive the
-report, and the skipped ones are listed in the dialog and in the note.
+report, and the skipped ones are listed in the notes.
 
-Special case: if the note fails **after a successful send**, the result
-stays "sent", but the analyst is explicitly asked to document manually.
+If the report cannot be stored in the datastore, the note is still
+created and documents the problem. If the note itself fails **after a
+successful send**, the result stays "sent" and the hook result asks the
+analyst to document manually (visible in the module log).
 
 ## Security
 
 - SMTP password: `sensitive_string`, **never** logged and **never**
   written into notes (masking filter across all logs/error texts).
-- Recipients are assembled server-side; template/format selections from
-  the frontend are re-validated against allowlists on the server.
+- Recipients are assembled server-side from customer contacts and module
+  configuration only.
+- The preview gate prevents sending content no one has reviewed: the
+  send is bound to a preview note by a fingerprint over recipients,
+  subject, mail body, templates and format.
 - Jinja2 sandbox + StrictUndefined + autoescape; template names are
   checked against the directory listing (no path traversal).
 - The subject is normalised to a single line (no header injection).
-- The mail body preview runs in a `sandbox` iframe.
-- The dialog endpoints require an authenticated IRIS session; without
-  an available auth mechanism the dialog is **not** registered
-  (fail closed).
+- The module adds no web routes or endpoints of its own – it only uses
+  IRIS' manual hooks, so IRIS' access control applies unchanged.
 
 ## Tests
 
@@ -372,57 +479,56 @@ python3 -m venv .venv
 make test          # or: python3 -m pytest
 ```
 
-71 tests, runnable without a running IRIS (IRIS access is encapsulated
+90 tests, runnable without a running IRIS (IRIS access is encapsulated
 in the `iris_adapter` and replaced by an in-memory fake in the tests).
-Covered among others: single/multiple CISO contacts, contacts with
-other roles being ignored, case-insensitive/exact role matching,
-configurable roles, contacts without email skipped, invalid contact
-email skipped and reported, no CISO contact blocking the send,
-trim/dedupe, SMTP with/without auth, TLS on/off, test mode override,
-mail template rendering with `case.*`, report rendering DOCX/HTML,
-mail/report preview, automatic directory creation, one note per send,
-attachment on the note, failure note on failed send, hard template
-errors.
+Covered among others: CISO contact selection and role matching, invalid
+contacts skipped and reported, preview notes, the preview gate
+(blocked without preview, invalidated by changed case data, recipients
+or send options, disabled via configuration, not applied to test
+sends), per-case send options, test mode, SMTP with/without auth and
+TLS on/off, template and report rendering, note titles incl. the 155
+character limit, attachment handling, failure notes for every error
+path, and notes for configuration errors.
 
 `tests/test_module_packaging.py` additionally guards the parts that
 would only break inside IRIS or after packaging: the
-`__iris_module_interface` discovery contract (package attribute,
-submodule file name and class name must agree), the module
-configuration definition, and that the mail templates actually ship
-inside the wheel and render under `StrictUndefined`.
+`__iris_module_interface` discovery contract, the module configuration
+definition, and that the mail templates ship inside the wheel and
+render under `StrictUndefined`.
+
+The IRIS adapter itself cannot be unit-tested without IRIS. It was
+verified end-to-end against a live IRIS v2.4.29 (preview, blocked send
+without preview, send, test send, configuration error; report
+generation, datastore attachment and SMTP delivery).
 
 ## Assumptions & limitations
 
-All IRIS-specific assumptions are marked in the code and located
-**only** in `customer_case_mailer/iris_adapter.py` and
-`ui/blueprint.py`:
+All IRIS-specific assumptions are located **only** in
+`customer_case_mailer/iris_adapter.py` (documented at the top of the
+file):
 
-1. **Dialog:** the IRIS hook framework (2.4.x) cannot open
-   parameterised dialogs. Because modules run inside the IRIS webapp
-   process, the module registers its own Flask blueprint at load time
-   (`/customer_case_mailer/…`). This is a deliberate, documented
-   extension point outside the official module API; if registration
-   fails, the hook send with defaults remains usable.
-2. **Customer contacts:** read from the IRIS model
-   `app.models.models.Contact` (table `contact`) via `client_id`, using
-   the fields `contact_name`, `contact_email` and `contact_role`
-   ("Contact Role" in the IRIS UI, a free-text field).
-3. **Reporter signatures:** `IrisMakeDocReport`/`IrisMakeMdReport`
-   vary between minor versions; the adapter uses feature detection.
-   On deviations adapt only the adapter.
-4. **Note attachment:** realised as a datastore file + link inside the
-   note (IRIS-conformant, since notes have no native attachments).
-5. **HTML report preview** opens in a new tab; the DOCX preview is
-   delivered as a download (browsers cannot render DOCX natively).
+1. **Synchronous hooks.** The hooks are registered with
+   `run_asynchronously=False`. IRIS does not pass the triggering user to
+   asynchronous hook handlers, and the IRIS reporter reads
+   `current_user` while generating a report – both only work inside the
+   analyst's request. Report generation and SMTP delivery therefore run
+   in that request (bounded by `smtp_timeout_seconds`).
+2. **No dialog.** IRIS 2.4 offers modules no supported way to add web
+   pages: with Flask 2.3, routes cannot be registered once the app
+   serves requests, and IRIS instantiates modules only on demand. The
+   preview/send flow uses notes instead.
+3. **Result feedback via notes.** The manual-hook route answers only
+   *"Queued task"*; results and errors are written into the case.
+4. **Customer contacts:** read from `app.models.models.Contact` via
+   `client_id` (`contact_name`, `contact_email`, `contact_role` – a
+   free-text field).
+5. **Note attachment:** a datastore file + link inside the note (IRIS
+   notes have no native attachments).
 6. **Module discovery:** the package declares
    `__iris_module_interface = "IrisCustomerCaseMailerInterface"` in its
    `__init__.py`. IRIS imports `<package>.<that value>` and instantiates
-   the class of the same name, so the attribute, the file name and the
-   class name must stay in sync (guarded by
-   `tests/test_module_packaging.py`).
-7. `buildnpush2iris.sh` restarts both containers itself. After changing
-   the module **configuration** in the IRIS UI a restart may still be
-   required for it to take effect.
+   the class of the same name – attribute, file name and class name must
+   stay in sync (guarded by `tests/test_module_packaging.py`).
 
 ## License
 

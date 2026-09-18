@@ -8,10 +8,11 @@ restart of the IRIS services may be required.
 module_name = "IrisCustomerCaseMailer"
 module_description = (
     "Sends customer-ready investigation reports by email directly from a "
-    "case (processor module, manual hook 'Send customer report')."
+    "case. Manual case hooks: 'Preview customer report', 'Send customer "
+    "report', 'Test send customer report'."
 )
 interface_version = "1.2.0"   # iris-module-interface, compatible with IRIS >= 2.4.27
-module_version = "1.0.0"
+module_version = "1.1.0"
 
 pipeline_support = False
 pipeline_info = {}
@@ -84,7 +85,7 @@ module_configuration = [
     {
         "param_name": "default_cc",
         "param_human_name": "Fixed CC recipients (CSV)",
-        "param_description": "Comma-separated CC addresses. Visible in the dialog, not editable.",
+        "param_description": "Comma-separated CC addresses added to every customer mail.",
         "default": None,
         "mandatory": False,
         "type": "string",
@@ -92,7 +93,7 @@ module_configuration = [
     {
         "param_name": "default_bcc",
         "param_human_name": "Fixed BCC recipients (CSV)",
-        "param_description": "Comma-separated BCC addresses. Visible in the dialog, not editable.",
+        "param_description": "Comma-separated BCC addresses added to every customer mail.",
         "default": None,
         "mandatory": False,
         "type": "string",
@@ -180,7 +181,8 @@ module_configuration = [
     {
         "param_name": "default_mail_template",
         "param_human_name": "Default mail template",
-        "param_description": "Preselection in the dialog and template for the hook direct send.",
+        "param_description": ("Mail template used when the case does not set its own "
+                              "(case custom attribute 'Mail template')."),
         "default": "standard_customer_mail.html",
         "mandatory": False,
         "type": "string",
@@ -188,7 +190,9 @@ module_configuration = [
     {
         "param_name": "default_report_template",
         "param_human_name": "Default report template",
-        "param_description": "Preselection (name or id) for dialog and hook direct send.",
+        "param_description": ("Investigation report template (name or id) used when the case "
+                              "does not set its own (case custom attribute 'Report template'). "
+                              "Set this or the case attribute - there is no implicit choice."),
         "default": None,
         "mandatory": False,
         "type": "string",
@@ -202,12 +206,13 @@ module_configuration = [
         "type": "string",
     },
     {
-        "param_name": "manual_hook_sends_with_defaults",
-        "param_human_name": "Hook sends directly with defaults",
-        "param_description": ("If enabled, the manual hook sends immediately using the "
-                              "default templates (no dialog). Otherwise the hook points "
-                              "to the send dialog."),
-        "default": False,
+        "param_name": "require_preview_before_send",
+        "param_human_name": "Require preview before sending",
+        "param_description": ("If enabled (recommended), 'Send customer report' only sends "
+                              "when a preview note with exactly the same content exists in "
+                              "the notes directory. Run 'Preview customer report' first. "
+                              "Does not apply to test sends."),
+        "default": True,
         "mandatory": False,
         "type": "bool",
     },

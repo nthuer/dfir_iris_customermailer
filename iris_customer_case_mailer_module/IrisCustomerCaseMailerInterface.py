@@ -1,15 +1,21 @@
 """Hook layer: IRIS module interface of the customer_case_mailer.
 
-Registers the manual case hook "Send customer report" and processes its
-invocations. The actual domain logic lives entirely in
-:mod:`customer_case_mailer` – this file is deliberately thin.
+Registers three manual case hooks and delegates to the domain logic in
+:mod:`customer_case_mailer`. This file is deliberately thin.
 
-Behaviour of the manual hook:
-- ``manual_hook_sends_with_defaults`` enabled: direct send using the
-  default templates/formats stored in the configuration.
-- otherwise: the hook reports the link to the send dialog (the IRIS
-  hook framework cannot open parameterised dialogs, see README
-  "Assumptions & limitations").
+    Preview customer report     render everything, store a PREVIEW note
+    Send customer report        send (requires a matching preview) + note
+    Test send customer report   send to the test recipients only + note
+
+The hooks are registered SYNCHRONOUSLY (``run_asynchronously=False``).
+Only then does the handler run inside the analyst's web request, which
+IRIS needs for two things: the analyst identity (IRIS does not pass the
+triggering user to asynchronous hook handlers) and the IRIS reporter
+(it reads ``current_user`` while generating a report).
+
+IRIS answers a manual hook in the UI only with "Queued task" - the
+result of every preview and send attempt is therefore written into the
+case as a note in the 'Communication' directory.
 """
 
 import traceback
@@ -23,11 +29,13 @@ from iris_customer_case_mailer_module.customer_case_mailer.config_service import
     raw_config_from_iris,
 )
 from iris_customer_case_mailer_module.customer_case_mailer.errors import MailerError
+from iris_customer_case_mailer_module.customer_case_mailer.hook_actions import (
+    MANUAL_HOOKS,
+    report_setup_failure,
+    run_hook,
+)
 from iris_customer_case_mailer_module.customer_case_mailer.iris_adapter import IrisAdapter
 from iris_customer_case_mailer_module.customer_case_mailer.mailer import CustomerCaseMailer
-from iris_customer_case_mailer_module.customer_case_mailer.models import SendSelection
-
-DIALOG_URL_PATTERN = "/customer_case_mailer/dialog?cid={case_id}"
 
 
 class IrisCustomerCaseMailerInterface(IrisModuleInterface):
@@ -42,51 +50,48 @@ class IrisCustomerCaseMailerInterface(IrisModuleInterface):
     _module_configuration = interface_conf.module_configuration
     _module_type = IrisModuleTypes.module_processor
 
-    def __init__(self):
-        super().__init__()
-        self._ccm_logger = get_logger()
-        # Register the send dialog (Flask blueprint) – best effort: not
-        # available outside the webapp process (e.g. worker).
-        try:
-            from iris_customer_case_mailer_module.customer_case_mailer.ui.blueprint import (
-                register_ui,
-            )
-            register_ui()
-        except Exception as exc:  # noqa: BLE001
-            self._ccm_logger.warning(
-                "Send dialog could not be registered "
-                "(only hook direct send available): %s" % exc)
-
     # ------------------------------------------------------------------- hooks
 
     def register_hooks(self, module_id: int):
-        """Registers the manual case hook 'Send customer report'."""
+        """Registers the manual case hooks (synchronous, see module doc)."""
         self.module_id = module_id
-        status = self.register_to_hook(
-            module_id,
-            iris_hook_name="on_manual_trigger_case",
-            manual_hook_name="Send customer report",
-        )
-        if status.is_failure():
-            self.log.error(status.get_message())
-            self.log.error(status.get_data())
-            return status
-        self.log.info("Hook 'Send customer report' registered.")
+        for hook_ui_name in MANUAL_HOOKS:
+            status = self.register_to_hook(
+                module_id,
+                iris_hook_name="on_manual_trigger_case",
+                manual_hook_name=hook_ui_name,
+                run_asynchronously=False,
+            )
+            if status.is_failure():
+                self.log.error(status.get_message())
+                self.log.error(status.get_data())
+                return status
+            self.log.info(f"Hook '{hook_ui_name}' registered.")
         return InterfaceStatus.I2Success("Hooks registered.")
 
     def hooks_handler(self, hook_name: str, hook_ui_name: str, data):
-        """Processes the manual hook invocation for one or more cases."""
-        self.log.info("Hook '%s' (%s) received." % (hook_name, hook_ui_name))
+        """Runs the requested action for each case the hook was called on."""
+        self.log.info(f"Hook '{hook_name}' ({hook_ui_name}) received.")
         messages = []
+        case_ids = [getattr(case, "case_id", None) for case in data]
+        case_ids = [cid for cid in case_ids if cid is not None]
+        adapter = IrisAdapter()
+        analyst_id, analyst_display = adapter.current_analyst()
+        raw_config = {}
         try:
             raw_config = self._raw_module_config()
-            for case in data:
-                case_id = getattr(case, "case_id", None)
-                if case_id is None:
-                    continue
-                messages.append(self._handle_case_trigger(raw_config, case_id))
+            mailer = CustomerCaseMailer(raw_config, adapter=adapter, logger=get_logger())
+            for case_id in case_ids:
+                result = run_hook(mailer, hook_ui_name, case_id,
+                                  analyst_id, analyst_display)
+                messages.append(f"Case #{case_id}: {result.message}")
         except MailerError as exc:
+            # Invalid configuration is detected before any case is touched.
+            # Write it into the cases anyway - IRIS only shows "Queued task".
             self.log.error(exc.user_message)
+            for case_id in case_ids:
+                report_setup_failure(adapter, raw_config, hook_ui_name, case_id,
+                                     analyst_id, analyst_display, exc.user_message)
             return InterfaceStatus.I2Error(message=exc.user_message, data=data)
         except Exception:  # noqa: BLE001
             self.log.error(traceback.format_exc())
@@ -102,39 +107,8 @@ class IrisCustomerCaseMailerInterface(IrisModuleInterface):
     # ----------------------------------------------------------------- intern
 
     def _raw_module_config(self):
-        """Current module configuration as a flat dict.
-
-        Primarily the configuration held by the interface, falling back
-        to a direct read from the IRIS DB (worker context).
-        """
-        for candidate in (getattr(self, "_dict_conf", None),
-                          getattr(self, "module_dict_conf", None)):
-            if candidate:
-                return raw_config_from_iris(candidate)
+        """Current module configuration as a flat dict (fresh from IRIS)."""
+        conf = self.module_dict_conf
+        if conf:
+            return raw_config_from_iris(conf)
         return raw_config_from_iris(IrisAdapter().get_module_raw_config())
-
-    def _handle_case_trigger(self, raw_config, case_id: int) -> str:
-        mailer = CustomerCaseMailer(raw_config, logger=self._ccm_logger)
-
-        if not mailer.config.manual_hook_sends_with_defaults:
-            url = DIALOG_URL_PATTERN.format(case_id=case_id)
-            return (f"Case #{case_id}: open the send dialog: {url} "
-                    "(direct send via hook is disabled).")
-
-        cfg = mailer.config
-        if not (cfg.default_mail_template and cfg.default_report_template):
-            return (f"Case #{case_id}: direct send not possible – "
-                    "'default_mail_template'/'default_report_template' are "
-                    "not configured.")
-
-        # The hook does not provide the triggering user; the send is
-        # documented as a system/hook send.
-        selection = SendSelection(
-            mail_template=cfg.default_mail_template,
-            report_template=cfg.default_report_template,
-            report_format=cfg.default_report_format,
-        )
-        result = mailer.send(case_id, analyst_id=None,
-                             analyst_display="IRIS hook (Send customer report)",
-                             selection=selection)
-        return f"Case #{case_id}: {result.message}"

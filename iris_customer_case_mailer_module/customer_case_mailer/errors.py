@@ -42,6 +42,10 @@ class ReportRenderError(MailerError):
     """Investigation report template cannot be rendered. Hard blocker."""
 
 
+class PreviewRequiredError(MailerError):
+    """No preview note matches the content that would be sent."""
+
+
 class NotesError(MailerError):
     """Note directory or note cannot be created/saved."""
 

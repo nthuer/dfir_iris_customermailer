@@ -4,43 +4,86 @@ All services work exclusively against this class. This keeps the rest
 of the module testable without a running IRIS (tests inject a fake
 adapter), and IRIS version deviations only ever require changes here.
 
-ASSUMPTIONS (checked against DFIR-IRIS v2.4.27 – on deviations adapt
-ONLY this file):
-- Modules run inside the IRIS process (webapp/worker) and may import
-  ``app.*``.
-- ``app.models.cases.Cases`` with fields name, description, open_date,
-  soc_id, client_id; the customer is ``app.models.models.Client``.
-- Customer contacts: ``app.models.models.Contact`` (table ``contact``)
-  with ``client_id``, ``contact_name``, ``contact_email`` and the
-  free-text field ``contact_role`` ("Contact Role" in the IRIS UI).
-- Report templates: ``app.models.models.CaseTemplateReport`` +
-  ``ReportType`` (name "Investigation"); format detection via the file
-  extension of the stored template.
-- Reporter: ``app.iris_engine.reporter.reporter`` with
-  ``IrisMakeDocReport`` (DOCX/docxtpl) and ``IrisMakeMdReport``
-  (Markdown/HTML). Signatures are called defensively via feature
-  detection because they vary between minor versions.
-- Notes: ``app.models.models.NotesDirectory`` (v2.4 directories) and
-  ``app.datamgmt.case.case_notes_db.add_note``.
-- Datastore: files on a case live in the datastore; links have the form
-  ``/datastore/file/view/<id>?cid=<case_id>``.
+VERIFIED against the DFIR-IRIS v2.4.29 source and a live v2.4.29
+instance (on deviations adapt ONLY this file):
+- Modules run inside the IRIS process and may import ``app.*``. The
+  manual hooks are registered synchronously, so the handler runs in the
+  analyst's web request: ``flask_login.current_user`` is the analyst,
+  and the IRIS reporter (which reads ``current_user.name``) works.
+- ``app.models.cases.Cases``: name, description, open_date, soc_id,
+  client_id (NOT NULL) and ``custom_attributes`` (JSON).
+- Customer: ``app.models.models.Client``; contacts:
+  ``app.models.models.Contact`` with client_id, contact_name,
+  contact_email and the free-text ``contact_role``.
+- Users: ``app.models.authorization.User`` (fields ``user``, ``name``).
+- Report templates: ``CaseTemplateReport`` (``internal_reference`` holds
+  the stored file name, the extension tells the format) + ``ReportType``
+  named "Investigation".
+- Reporter: ``IrisMakeDocReport.generate_doc_report(doc_type)`` and
+  ``IrisMakeMdReport.generate_md_report(doc_type)``, both constructed
+  with ``(tmp_dir, report_id, caseid, safe_mode)``; they return
+  ``(path, message)`` or ``None`` / ``(None, error)``.
+- Notes: ``NoteDirectory`` (name, parent_id, case_id),
+  ``case_notes_db.add_note(note_title, creation_date, user_id, caseid,
+  directory_id, note_content)`` which commits itself. Note titles are
+  limited to 155 characters.
+- Datastore: ``datastore_get_root(cid)`` (initialises the tree),
+  ``datastore_get_standard_path(dsf, cid)`` (needs ``file_uuid``).
+  ``DataStoreFile.file_local_name`` must hold the FULL path – IRIS
+  checks it lies inside the datastore before serving the file – and
+  ``added_by_user_id`` is NOT NULL. Files are served at
+  ``/datastore/file/view/<file_id>?cid=<case_id>``.
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import tempfile
-from datetime import datetime
+import uuid
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from .errors import AdapterError, AttachmentError, NotesError, ReportRenderError
 from .models import CaseContext, CustomerContact
 
-MODULE_NAME = "IrisCustomerCaseMailer"
+MODULE_NAME = "IrisCustomerCaseMailer"          # module_human_name in IRIS
+PACKAGE_NAME = "iris_customer_case_mailer_module"  # module_name in IRIS
 
 _DOCX_EXT = (".docx",)
 _HTML_EXT = (".html", ".htm", ".md")
+
+# Case custom attribute field labels -> send option keys (case-insensitive).
+CASE_OPTION_FIELDS = {
+    "mail template": "mail_template",
+    "report template": "report_template",
+    "report format": "report_format",
+    "mail subject": "subject",
+}
+
+
+def extract_case_send_options(custom_attributes: Any) -> Dict[str, str]:
+    """Reads the per-case send options from case custom attributes.
+
+    IRIS stores custom attributes as ``{Tab: {Field: {"value": ...}}}``.
+    Fields are matched by label (case-insensitive) in any tab; empty
+    values are ignored so the module defaults apply.
+    """
+    options: Dict[str, str] = {}
+    if not isinstance(custom_attributes, dict):
+        return options
+    for tab in custom_attributes.values():
+        if not isinstance(tab, dict):
+            continue
+        for label, field in tab.items():
+            key = CASE_OPTION_FIELDS.get(str(label).strip().lower())
+            if key is None:
+                continue
+            value = field.get("value") if isinstance(field, dict) else field
+            if value is not None and str(value).strip():
+                options[key] = str(value).strip()
+    return options
 
 
 class IrisAdapter:
@@ -61,37 +104,56 @@ class IrisAdapter:
             )
 
     def _db_session(self):
-        app_module = self._import("app")
-        return app_module.db.session
+        return self._import("app").db.session
 
-    # ------------------------------------------------------------- module config
+    # ------------------------------------------------------------ module config
 
-    def get_module_raw_config(self, module_name: str = MODULE_NAME) -> Any:
-        """Reads the persisted module configuration from the IRIS DB."""
+    def get_module_raw_config(self) -> Any:
+        """Reads the persisted module configuration from the IRIS DB.
+
+        Fallback only - the interface normally uses IRIS'
+        ``module_dict_conf``.
+        """
         models = self._import("app.models.models")
         iris_module = (self._db_session().query(models.IrisModule)
-                       .filter(models.IrisModule.module_name == module_name)
+                       .filter(models.IrisModule.module_name == PACKAGE_NAME)
                        .first())
         if iris_module is None:
             raise AdapterError(
-                f"Module '{module_name}' is not registered in IRIS. Please "
-                f"add it via the module management and restart the services.")
+                f"Module '{PACKAGE_NAME}' is not registered in IRIS. Please "
+                f"add it in Advanced -> Modules.")
         return iris_module.module_config
 
-    # ------------------------------------------------------------------- case
+    # ------------------------------------------------------------------ analyst
+
+    def current_analyst(self) -> Tuple[Optional[int], str]:
+        """The analyst who triggered the hook (synchronous hooks only)."""
+        try:
+            from flask_login import current_user
+            user_id = getattr(current_user, "id", None)
+            if user_id is None:
+                return None, "unknown (no logged-in user)"
+            login = getattr(current_user, "user", None)
+            name = getattr(current_user, "name", None)
+            label = f"{name} ({login})" if name and login and name != login else (login or name)
+            return user_id, f"{label} (id {user_id})"
+        except Exception:  # noqa: BLE001 - outside a request context
+            return None, "unknown (no request context)"
+
+    # --------------------------------------------------------------------- case
 
     def get_case_context(self, case_id: int) -> CaseContext:
         cases_mod = self._import("app.models.cases")
         models = self._import("app.models.models")
+        session = self._db_session()
 
-        case = (self._db_session().query(cases_mod.Cases)
-                .filter(cases_mod.Cases.case_id == case_id).first())
+        case = session.query(cases_mod.Cases).filter(cases_mod.Cases.case_id == case_id).first()
         if case is None:
             raise AdapterError(f"Case #{case_id} was not found.")
 
         customer = None
         if getattr(case, "client_id", None):
-            customer = (self._db_session().query(models.Client)
+            customer = (session.query(models.Client)
                         .filter(models.Client.client_id == case.client_id).first())
 
         customer_name = None
@@ -104,7 +166,7 @@ class IrisAdapter:
             contacts = self.get_customer_contacts(customer.client_id)
 
         open_date = getattr(case, "open_date", None)
-        if isinstance(open_date, datetime):
+        if isinstance(open_date, (datetime, date)):
             open_date_str = open_date.strftime("%Y-%m-%d")
         else:
             open_date_str = str(open_date) if open_date else ""
@@ -118,58 +180,35 @@ class IrisAdapter:
             customer_name=customer_name,
             customer_attributes=customer_attrs,
             contacts=contacts,
+            send_options=extract_case_send_options(getattr(case, "custom_attributes", None)),
         )
 
     def get_customer_contacts(self, client_id: int) -> List[CustomerContact]:
         """All contacts configured on a customer (IRIS: Customer -> Contacts)."""
         models = self._import("app.models.models")
-        contact_cls = getattr(models, "Contact", None)
-        if contact_cls is None:
-            raise AdapterError(
-                "IRIS model 'Contact' not found – customer contacts require "
-                "IRIS >= 2.4.")
-
-        rows = (self._db_session().query(contact_cls)
-                .filter(contact_cls.client_id == client_id).all())
+        rows = (self._db_session().query(models.Contact)
+                .filter(models.Contact.client_id == client_id).all())
         return [
             CustomerContact(
-                name=(getattr(row, "contact_name", "") or "").strip(),
-                email=(getattr(row, "contact_email", "") or "").strip(),
-                role=(getattr(row, "contact_role", "") or "").strip(),
+                name=(row.contact_name or "").strip(),
+                email=(row.contact_email or "").strip(),
+                role=(row.contact_role or "").strip(),
             )
             for row in rows
         ]
 
-    def get_user_display(self, user_id: Optional[int]) -> str:
-        if user_id is None:
-            return "unknown"
-        try:
-            models = self._import("app.models.models")
-            user = (self._db_session().query(models.User)
-                    .filter(models.User.id == user_id).first())
-            if user is not None:
-                name = getattr(user, "user", None) or getattr(user, "name", None)
-                return f"{name} (id {user_id})"
-        except AdapterError:
-            pass
-        return f"user id {user_id}"
-
-    # --------------------------------------------------------------- reporting
+    # ---------------------------------------------------------------- reporting
 
     def list_investigation_report_templates(self) -> List[Dict]:
         models = self._import("app.models.models")
-        session = self._db_session()
-
-        query = (session.query(models.CaseTemplateReport, models.ReportType)
+        query = (self._db_session().query(models.CaseTemplateReport, models.ReportType)
                  .join(models.ReportType,
                        models.CaseTemplateReport.report_type_id == models.ReportType.id)
                  .filter(models.ReportType.name.ilike("Investigation%")))
 
         templates = []
         for template, _rtype in query.all():
-            filename = (getattr(template, "internal_reference", None)
-                        or getattr(template, "filename", "") or "")
-            ext = os.path.splitext(str(filename))[1].lower()
+            ext = os.path.splitext(str(template.internal_reference or ""))[1].lower()
             if ext in _DOCX_EXT:
                 fmt = "docx"
             elif ext in _HTML_EXT:
@@ -179,75 +218,51 @@ class IrisAdapter:
             templates.append({
                 "id": template.id,
                 "name": template.name,
-                "description": getattr(template, "description", "") or "",
+                "description": template.description or "",
                 "format": fmt,
             })
         return templates
 
     def generate_report(self, case_id: int, template_id: int,
                         report_format: str, user_id: Optional[int]) -> bytes:
-        """Renders via the IRIS reporter and returns the file bytes.
-
-        Reporter signatures vary slightly between IRIS versions, hence
-        feature detection instead of a hard signature.
-        """
+        """Renders via the IRIS reporter and returns the file bytes."""
         reporter_mod = self._import("app.iris_engine.reporter.reporter")
-        cls_name = "IrisMakeDocReport" if report_format == "docx" else "IrisMakeMdReport"
-        reporter_cls = getattr(reporter_mod, cls_name, None)
-        if reporter_cls is None:
-            raise ReportRenderError(
-                f"IRIS reporter '{cls_name}' not found – "
-                f"check the IRIS version (expected >= 2.4.27).")
+        if report_format == "docx":
+            reporter_cls, method_name = reporter_mod.IrisMakeDocReport, "generate_doc_report"
+        else:
+            reporter_cls, method_name = reporter_mod.IrisMakeMdReport, "generate_md_report"
 
         tmp_dir = tempfile.mkdtemp(prefix="ccm_report_")
         try:
-            try:
-                reporter = reporter_cls(tmp_dir, template_id, case_id, False)
-            except TypeError:
-                reporter = reporter_cls(tmp_dir, template_id, case_id)
+            reporter = reporter_cls(tmp_dir, template_id, case_id, False)
+            result = getattr(reporter, method_name)("Investigation")
 
-            method = (getattr(reporter, "generate_doc_report", None)
-                      or getattr(reporter, "generate_md_report", None)
-                      or getattr(reporter, "generate_report", None))
-            if method is None:
-                raise ReportRenderError(
-                    f"IRIS reporter '{cls_name}' offers no known "
-                    f"generation method.")
-
-            try:
-                result = method("Investigation")
-            except TypeError:
-                result = method()
-
-            # Normalise result: path or (path, logs).
-            report_path = result[0] if isinstance(result, (tuple, list)) else result
+            if isinstance(result, (tuple, list)):
+                report_path, message = (list(result) + [None])[:2]
+            else:
+                report_path, message = result, None
             if not report_path or not os.path.isfile(str(report_path)):
                 raise ReportRenderError(
-                    "The IRIS reporter did not produce a report file "
-                    "(template broken or not renderable).")
+                    "The IRIS reporter did not produce a report file"
+                    + (f": {message}" if message else " (template broken or not renderable)."))
 
             with open(str(report_path), "rb") as fh:
                 return fh.read()
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    # ------------------------------------------------------------------- notes
+    # -------------------------------------------------------------------- notes
 
     def ensure_note_directory(self, case_id: int, name: str,
                               user_id: Optional[int]) -> int:
         """Returns the id of the note directory, creating it when missing."""
         models = self._import("app.models.models")
-        directory_cls = (getattr(models, "NotesDirectory", None)
-                         or getattr(models, "NoteDirectory", None))
-        if directory_cls is None:
-            raise NotesError(
-                "IRIS model for note directories not found – "
-                "note directories require IRIS >= 2.4.")
-
+        directory_cls = models.NoteDirectory
         session = self._db_session()
         existing = (session.query(directory_cls)
                     .filter(directory_cls.case_id == case_id,
-                            directory_cls.name == name)
+                            directory_cls.name == name,
+                            directory_cls.parent_id.is_(None))
                     .first())
         if existing is not None:
             return existing.id
@@ -266,31 +281,36 @@ class IrisAdapter:
     def add_note(self, case_id: int, directory_id: int, title: str,
                  content: str, user_id: Optional[int]) -> int:
         notes_db = self._import("app.datamgmt.case.case_notes_db")
-        add_note_fn = getattr(notes_db, "add_note", None)
-        if add_note_fn is None:
-            raise NotesError("IRIS function case_notes_db.add_note not found.")
         try:
-            note = add_note_fn(
+            note = notes_db.add_note(
                 note_title=title,
                 creation_date=datetime.utcnow(),
                 user_id=user_id,
                 caseid=case_id,
-                note_content=content,
                 directory_id=directory_id,
+                note_content=content,
             )
-        except TypeError:
-            # Older signature without keyword support
-            note = add_note_fn(title, datetime.utcnow(), user_id, case_id,
-                               directory_id, content)
         except Exception as exc:  # noqa: BLE001
             self._db_session().rollback()
-            raise NotesError(f"Note could not be saved: {exc}",
-                             details=repr(exc))
+            raise NotesError(f"Note could not be saved: {exc}", details=repr(exc))
         if note is None:
             raise NotesError("Note could not be saved (IRIS returned None).")
-        return getattr(note, "note_id", getattr(note, "id", 0))
+        return note.note_id
 
-    # --------------------------------------------------------------- datastore
+    def note_exists(self, case_id: int, title_prefix: str,
+                    content_fragment: str) -> bool:
+        """True if a note of the case starts with the title prefix and
+        contains the fragment (used for the preview gate)."""
+        models = self._import("app.models.models")
+        notes = models.Notes
+        found = (self._db_session().query(notes.note_id)
+                 .filter(notes.note_case_id == case_id,
+                         notes.note_title.startswith(title_prefix, autoescape=True),
+                         notes.note_content.contains(content_fragment, autoescape=True))
+                 .first())
+        return found is not None
+
+    # ---------------------------------------------------------------- datastore
 
     def store_report_in_datastore(self, case_id: int, filename: str,
                                   content: bytes,
@@ -299,65 +319,51 @@ class IrisAdapter:
 
         Returns (file_id, link) – the link is referenced in the note.
         """
-        import hashlib
+        if user_id is None:
+            raise AttachmentError(
+                "No analyst could be determined - IRIS requires an owner for "
+                "datastore files.")
 
         models = self._import("app.models.models")
         ds_db = self._import("app.datamgmt.datastore.datastore_db")
         session = self._db_session()
 
-        # Determine the root node of the case datastore (initialise if needed).
-        root_getter = (getattr(ds_db, "datastore_get_root", None)
-                       or getattr(ds_db, "get_ds_root", None))
-        root = root_getter(case_id) if root_getter else None
+        root = ds_db.datastore_get_root(case_id)
         if root is None:
-            init_fn = getattr(ds_db, "init_ds_tree", None)
-            root = init_fn(case_id) if init_fn else None
-        if root is None:
-            raise AttachmentError(
-                "Datastore root directory of the case not found – "
-                "report cannot be stored.")
-        root_id = getattr(root, "path_id", getattr(root, "id", None))
+            raise AttachmentError("Datastore of the case could not be initialised.")
 
-        # Ask IRIS for the physical storage path.
-        path_fn = (getattr(ds_db, "datastore_get_local_file_path", None)
-                   or getattr(ds_db, "datastore_get_standard_path", None))
-
+        written_path = None
         try:
             dsf = models.DataStoreFile(
+                file_uuid=uuid.uuid4(),   # needed before insert to compute the path
                 file_original_name=filename,
                 file_description="Investigation report sent via customer_case_mailer",
                 file_case_id=case_id,
                 file_date_added=datetime.utcnow(),
-                file_parent_id=root_id,
+                file_parent_id=root.path_id,
                 added_by_user_id=user_id,
                 file_size=len(content),
+                file_is_ioc=False,
                 file_is_evidence=False,
+                file_sha256=hashlib.sha256(content).hexdigest(),
             )
-            session.add(dsf)
-            session.flush()  # file_id is needed for path/link
-
-            if path_fn is None:
-                raise AttachmentError(
-                    "IRIS datastore path function not found – "
-                    "report cannot be stored.")
-            local_path = path_fn(dsf, case_id)
-            local_path = getattr(local_path, "as_posix", lambda: str(local_path))()
-
-            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            local_path = ds_db.datastore_get_standard_path(dsf, case_id)
             with open(local_path, "wb") as fh:
                 fh.write(content)
+            written_path = local_path
 
-            dsf.file_local_name = os.path.basename(local_path)
-            dsf.file_sha256 = hashlib.sha256(content).hexdigest()
+            dsf.file_local_name = str(local_path)   # full path, see module doc
+            session.add(dsf)
             session.commit()
-        except AttachmentError:
-            session.rollback()
-            raise
         except Exception as exc:  # noqa: BLE001
             session.rollback()
+            if written_path is not None:
+                try:
+                    os.remove(written_path)
+                except OSError:
+                    pass
             raise AttachmentError(
                 f"Report could not be stored in the datastore: {exc}",
                 details=repr(exc))
 
-        link = f"/datastore/file/view/{dsf.file_id}?cid={case_id}"
-        return dsf.file_id, link
+        return dsf.file_id, f"/datastore/file/view/{dsf.file_id}?cid={case_id}"

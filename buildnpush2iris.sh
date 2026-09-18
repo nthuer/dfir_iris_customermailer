@@ -8,9 +8,9 @@
 #   ./buildnpush2iris.sh -a     install into the worker AND app container
 #   ./buildnpush2iris.sh -h     show this help
 #
-# This module registers a manual case hook (handled by the worker) and a
-# send dialog served by the web app, so it has to be installed into BOTH
-# containers: always run it with -a.
+# This module's hooks run synchronously inside the web app, so the app
+# container is the one that matters - which the IRIS convention only
+# covers with -a. Always run it with -a (app AND worker).
 #
 # Container names can be overridden for non-standard deployments:
 #   IRIS_APP_CONTAINER=my_app IRIS_WORKER_CONTAINER=my_worker ./buildnpush2iris.sh -a
@@ -31,9 +31,8 @@ usage() {
     cat <<'USAGE'
 Usage: ./buildnpush2iris.sh [-a|-h]
 
-  -a    Install into the worker AND the app container (recommended, and
-        required for this module: the hook runs in the worker, the send
-        dialog is served by the app).
+  -a    Install into the worker AND the app container (required for this
+        module: its hooks run synchronously inside the app container).
   -h    Show this help.
 
   Without a flag the module is installed into the worker container only.
@@ -82,8 +81,8 @@ rm -rf dist build ./*.egg-info
 if "$PYTHON" -c "import build" >/dev/null 2>&1; then
     "$PYTHON" -m build --wheel >/dev/null
 else
-    "$PYTHON" -c "import wheel" >/dev/null 2>&1 \
-        || die "Neither 'build' nor 'wheel' is installed. Run: $PYTHON -m pip install wheel"
+    "$PYTHON" -c "import setuptools, wheel" >/dev/null 2>&1 \
+        || die "Building needs 'setuptools' and 'wheel' (or 'build'). Run: $PYTHON -m pip install setuptools wheel"
     "$PYTHON" setup.py bdist_wheel >/dev/null
 fi
 
@@ -92,9 +91,9 @@ WHEEL_PATH="$(ls -1t dist/*.whl 2>/dev/null | head -n 1 || true)"
 WHEEL_NAME="$(basename "$WHEEL_PATH")"
 ok "Built $WHEEL_NAME"
 
-# Fail fast if the templates did not make it into the wheel - the module
-# would install cleanly but be unable to render mails or the dialog.
-# The listing is captured once and matched with here-strings on purpose:
+# Fail fast if the mail templates did not make it into the wheel - the
+# module would install cleanly but be unable to render any mail.
+# The listing is captured once and matched with a here-string on purpose:
 # piping into `grep -q` under `set -o pipefail` reports a failed pipeline
 # even on a match, because grep exits at the first hit and unzip then
 # dies on SIGPIPE - which would reject a perfectly valid wheel.
@@ -103,10 +102,7 @@ if command -v unzip >/dev/null 2>&1; then
     if ! grep -q "mail_templates/.*\.html" <<< "$wheel_listing"; then
         die "Wheel is missing the mail templates - check MANIFEST.in / package_data."
     fi
-    if ! grep -q "ui/templates/dialog\.html" <<< "$wheel_listing"; then
-        die "Wheel is missing the send dialog - check MANIFEST.in / package_data."
-    fi
-    ok "Wheel contains dialog and mail templates"
+    ok "Wheel contains the mail templates"
 fi
 
 # --------------------------------------------------------------- deploy
@@ -139,11 +135,12 @@ cat <<EOF
 
 $(ok "Done.")
 
-Next steps in the IRIS web interface:
+Next steps in the IRIS web interface (first installation only):
   1. Advanced -> Modules -> Add module
   2. Module name: iris_customer_case_mailer_module
-  3. Fill in the configuration (SMTP host/port/sender are mandatory)
-  4. Enable the module
+  3. Configure at least smtp_host, smtp_from_address and
+     default_report_template (the module is active right away)
 
-The hook then appears in a case under: Actions -> Send customer report
+In a case, the Processors menu (bolt icon) then offers:
+  Preview customer report / Send customer report / Test send customer report
 EOF

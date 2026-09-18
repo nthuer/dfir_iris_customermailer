@@ -34,7 +34,7 @@ class MailerConfig:
     allowed_report_templates: List[str]   # empty = all investigation templates
     allowed_mail_templates: List[str]     # empty = all templates in the directory
     mail_templates_dir: str
-    manual_hook_sends_with_defaults: bool
+    require_preview_before_send: bool
     default_mail_template: Optional[str]
     default_report_template: Optional[str]
     default_report_format: str
@@ -74,6 +74,10 @@ class CaseContext:
     ``customer_name`` is None when no customer is assigned to the case.
     ``contacts`` holds all contacts configured on that customer; the
     recipient service picks the ones carrying the configured role.
+    ``send_options`` holds the per-case choices an analyst made in the
+    case custom attributes (keys: ``mail_template``, ``report_template``,
+    ``report_format``, ``subject``); missing keys fall back to the module
+    defaults.
     """
 
     case_id: int
@@ -84,6 +88,7 @@ class CaseContext:
     customer_name: Optional[str]
     customer_attributes: Dict = field(default_factory=dict)
     contacts: List[CustomerContact] = field(default_factory=list)
+    send_options: Dict[str, str] = field(default_factory=dict)
 
     def template_context(self) -> Dict:
         """Context for mail/subject templates.
@@ -133,13 +138,16 @@ class ResolvedRecipients:
 
 @dataclass(frozen=True)
 class SendSelection:
-    """Analyst selection from the dialog (validated server-side)."""
+    """What to send for a case: case custom attributes, else module defaults.
+
+    Everything is validated server-side again when rendering.
+    """
 
     mail_template: str
     report_template: str          # template name or id (as string)
     report_format: str            # "docx" | "html"
-    subject_override: Optional[str] = None  # final subject if edited
-    test_send: bool = False       # explicit test send from the dialog
+    subject_override: Optional[str] = None  # final subject if set on the case
+    test_send: bool = False       # triggered via the test-send hook
 
 
 @dataclass(frozen=True)
@@ -154,8 +162,20 @@ class ReportArtifact:
 
 
 @dataclass(frozen=True)
+class RenderedMail:
+    """Everything a send would transmit, rendered but not sent."""
+
+    recipients: "ResolvedRecipients"
+    subject: str
+    body_html: str
+    artifact: ReportArtifact
+    selection: SendSelection
+    fingerprint: str   # identifies exactly this content, see mailer.fingerprint
+
+
+@dataclass(frozen=True)
 class SendResult:
-    """Result of a send attempt, for UI and hook."""
+    """Result of a preview or send attempt, reported back to the hook."""
 
     success: bool
     message: str

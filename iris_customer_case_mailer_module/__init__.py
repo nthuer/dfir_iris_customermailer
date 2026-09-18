@@ -14,5 +14,5 @@ imports the submodule itself, and keeping this file free of
 (``customer_case_mailer``) be imported and unit-tested without IRIS.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __iris_module_interface = "IrisCustomerCaseMailerInterface"

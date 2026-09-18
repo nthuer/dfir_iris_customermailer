@@ -162,8 +162,11 @@ def load_config(raw: Optional[Dict[str, Any]]) -> MailerConfig:
         allowed_mail_templates=_csv_list(raw.get("allowed_mail_templates")),
         mail_templates_dir=(_as_str(raw.get("mail_templates_dir"))
                             or BUNDLED_MAIL_TEMPLATES_DIR),
-        manual_hook_sends_with_defaults=_as_bool(raw.get("manual_hook_sends_with_defaults"),
-                                                 "manual_hook_sends_with_defaults"),
+        # Default on: a production send must match a preview note.
+        require_preview_before_send=(
+            True if raw.get("require_preview_before_send") is None
+            else _as_bool(raw.get("require_preview_before_send"),
+                          "require_preview_before_send")),
         default_mail_template=_as_str(raw.get("default_mail_template")),
         default_report_template=_as_str(raw.get("default_report_template")),
         default_report_format=default_report_format,
