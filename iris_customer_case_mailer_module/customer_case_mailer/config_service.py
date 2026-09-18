@@ -10,6 +10,7 @@ that analysts can understand, and are shown in the UI.
 
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List, Optional
 
 from .errors import ConfigError
@@ -17,6 +18,12 @@ from .models import MailerConfig
 from .recipient_service import is_valid_email, parse_address_csv
 
 SUPPORTED_REPORT_FORMATS = ("docx", "html")
+
+# Mail templates shipped inside the wheel. Used when the module
+# configuration leaves 'mail_templates_dir' empty, so the module works
+# right after installation without copying files into the containers.
+BUNDLED_MAIL_TEMPLATES_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "mail_templates")
 
 
 def raw_config_from_iris(module_config: Any) -> Dict[str, Any]:
@@ -153,7 +160,8 @@ def load_config(raw: Optional[Dict[str, Any]]) -> MailerConfig:
         allowed_report_formats=allowed_formats,
         allowed_report_templates=_csv_list(raw.get("allowed_report_templates")),
         allowed_mail_templates=_csv_list(raw.get("allowed_mail_templates")),
-        mail_templates_dir=_require(raw, "mail_templates_dir"),
+        mail_templates_dir=(_as_str(raw.get("mail_templates_dir"))
+                            or BUNDLED_MAIL_TEMPLATES_DIR),
         manual_hook_sends_with_defaults=_as_bool(raw.get("manual_hook_sends_with_defaults"),
                                                  "manual_hook_sends_with_defaults"),
         default_mail_template=_as_str(raw.get("default_mail_template")),

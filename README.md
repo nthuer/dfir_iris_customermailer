@@ -86,8 +86,11 @@ data known up to that point.
 ## Project structure
 
 ```
+buildnpush2iris.sh                     # build the wheel + install into IRIS
+Makefile                               # make test / build / install / clean
+setup.py, MANIFEST.in                  # packaging (wheel incl. templates)
 iris_customer_case_mailer_module/
-├── __init__.py                        # exports the interface class for IRIS
+├── __init__.py                        # declares __iris_module_interface
 ├── IrisCustomerCaseMailerInterface.py # hook layer (processor module)
 ├── customer_case_mailer_conf.py       # module metadata + configuration definition
 └── customer_case_mailer/              # domain logic (testable without IRIS)
@@ -101,44 +104,89 @@ iris_customer_case_mailer_module/
     ├── notes_service.py               # notes service (Communication, attachment)
     ├── audit_service.py               # error/audit service (secret masking)
     ├── iris_adapter.py                # the ONLY place touching IRIS internals
+    ├── mail_templates/                # default HTML mail templates (shipped)
     └── ui/
         ├── blueprint.py               # send dialog (Flask blueprint)
         └── templates/dialog.html      # dialog frontend (vanilla JS)
-examples/mail_templates/standard_customer_mail.html
-tests/                                 # 63 unit/flow tests (run without IRIS)
+tests/                                 # 71 unit/flow tests (run without IRIS)
 ```
 
 ## Installation
 
-1. **Install the package into the IRIS environment** (inside the
-   `iriswebapp_app` and `iriswebapp_worker` containers):
+Installation follows the usual DFIR-IRIS module flow: build a wheel and
+install it into the IRIS containers, then register the module in the web
+interface.
 
-   ```bash
-   pip install /path/to/iris_customer_case_mailer_module
-   # or from a git repo:
-   pip install git+https://…/iris_customer_case_mailer_module.git
-   ```
+**Requirements:** a running DFIR-IRIS (>= 2.4.27) deployment, `docker`,
+and `python3` with `wheel` (or `build`) on the host.
 
-2. **Provide the mail templates** (the path must be reachable for the
-   webapp *and* the worker, e.g. via a volume):
+### 1. Clone and install
 
-   ```bash
-   mkdir -p /opt/iris/customer_case_mailer/mail_templates
-   cp examples/mail_templates/standard_customer_mail.html \
-      /opt/iris/customer_case_mailer/mail_templates/
-   ```
+```bash
+git clone https://github.com/nthuer/dfir_iris_customermailer
+cd dfir_iris_customermailer
+./buildnpush2iris.sh -a
+```
 
-3. **Register the module in IRIS**: *Advanced → Modules → Add module* →
-   enter the module name `iris_customer_case_mailer_module`.
+The script builds the wheel, copies it to `/iriswebapp/dependencies/` in
+the containers, installs it with `pip3 install --force-reinstall` and
+restarts them.
 
-4. **Configure** (see below) and **enable** the module.
+**Always use `-a`**: it installs into the worker *and* the app
+container. This module needs both – the manual hook runs in the worker,
+the send dialog is served by the app. Without a flag only the worker is
+updated.
 
-5. **Restart the IRIS services** (webapp + worker) so that hook and
-   dialog blueprint get registered:
+Non-standard container names can be overridden:
 
-   ```bash
-   docker compose restart app worker
-   ```
+```bash
+IRIS_APP_CONTAINER=my_app IRIS_WORKER_CONTAINER=my_worker ./buildnpush2iris.sh -a
+```
+
+### 2. Register the module in IRIS
+
+1. *Advanced → Modules → Add module*
+2. Module name: `iris_customer_case_mailer_module`
+3. Fill in the configuration (see [Module
+   configuration](#module-configuration); `smtp_host`, `smtp_port` and
+   `smtp_from_address` are mandatory)
+4. **Enable** the module
+
+The hook then shows up inside a case under *Actions → Send customer
+report*.
+
+### 3. Optional: use your own mail templates
+
+The module ships with a default HTML mail template, so it works right
+after installation. To use your own, mount a directory into **both**
+containers and point `mail_templates_dir` at it.
+
+In `/opt/iris-web/docker-compose.yml`, add the volume to the `app` and
+the `worker` service:
+
+```yaml
+      - "./docker/mail_templates:/opt/iris/mail_templates:ro"
+```
+
+Then restart IRIS and set `mail_templates_dir` to
+`/opt/iris/mail_templates` in the module configuration:
+
+```bash
+cd /opt/iris-web && docker compose down && docker compose up -d
+```
+
+### Updating
+
+Pull the new version and run the script again – `--force-reinstall`
+replaces the installed wheel:
+
+```bash
+git pull
+./buildnpush2iris.sh -a
+```
+
+If the set of configuration parameters changed, remove and re-add the
+module in *Advanced → Modules* so IRIS picks up the new definition.
 
 ## Customer contacts (CISO)
 
@@ -194,7 +242,7 @@ Details of the matching:
 | `allowed_report_formats` | CSV | yes | `docx,html` | only `docx`/`html` |
 | `allowed_report_templates` | CSV | no | – | names/ids; empty = all |
 | `allowed_mail_templates` | CSV | no | – | file names; empty = all |
-| `mail_templates_dir` | string | yes | `/opt/iris/customer_case_mailer/mail_templates` | HTML mail templates |
+| `mail_templates_dir` | string | no | – | own HTML mail templates; empty ⇒ the ones shipped with the module |
 | `default_mail_template` | string | no | `standard_customer_mail.html` | preselection/hook send |
 | `default_report_template` | string | no | – | preselection/hook send |
 | `default_report_format` | string | no | `docx` | preselection/hook send |
@@ -206,8 +254,11 @@ understandable error message.
 
 ## Mail templates
 
-- HTML files (`.html`/`.htm`) in `mail_templates_dir`; multiple
-  templates are supported and selectable in the dialog.
+- A default template (`standard_customer_mail.html`) ships inside the
+  wheel and is used when `mail_templates_dir` is empty.
+- To use your own: HTML files (`.html`/`.htm`) in the directory set as
+  `mail_templates_dir` (see [Installation](#installation) step 3);
+  multiple templates are supported and selectable in the dialog.
 - **Same template syntax as the IRIS report templates** (Jinja2:
   `{{ … }}`, `{% … %}`).
 - Supported variables (at minimum):
@@ -316,12 +367,12 @@ stays "sent", but the analyst is explicitly asked to document manually.
 ## Tests
 
 ```bash
-python -m venv .venv
-.venv/Scripts/pip install -r requirements-dev.txt   # Windows
-python -m pytest
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt
+make test          # or: python3 -m pytest
 ```
 
-63 tests, runnable without a running IRIS (IRIS access is encapsulated
+71 tests, runnable without a running IRIS (IRIS access is encapsulated
 in the `iris_adapter` and replaced by an in-memory fake in the tests).
 Covered among others: single/multiple CISO contacts, contacts with
 other roles being ignored, case-insensitive/exact role matching,
@@ -332,6 +383,13 @@ mail template rendering with `case.*`, report rendering DOCX/HTML,
 mail/report preview, automatic directory creation, one note per send,
 attachment on the note, failure note on failed send, hard template
 errors.
+
+`tests/test_module_packaging.py` additionally guards the parts that
+would only break inside IRIS or after packaging: the
+`__iris_module_interface` discovery contract (package attribute,
+submodule file name and class name must agree), the module
+configuration definition, and that the mail templates actually ship
+inside the wheel and render under `StrictUndefined`.
 
 ## Assumptions & limitations
 
@@ -356,8 +414,15 @@ All IRIS-specific assumptions are marked in the code and located
    note (IRIS-conformant, since notes have no native attachments).
 5. **HTML report preview** opens in a new tab; the DOCX preview is
    delivered as a download (browsers cannot render DOCX natively).
-6. After installation/configuration changes a **restart of the IRIS
-   services** may be required (hook/blueprint registration).
+6. **Module discovery:** the package declares
+   `__iris_module_interface = "IrisCustomerCaseMailerInterface"` in its
+   `__init__.py`. IRIS imports `<package>.<that value>` and instantiates
+   the class of the same name, so the attribute, the file name and the
+   class name must stay in sync (guarded by
+   `tests/test_module_packaging.py`).
+7. `buildnpush2iris.sh` restarts both containers itself. After changing
+   the module **configuration** in the IRIS UI a restart may still be
+   required for it to take effect.
 
 ## License
 

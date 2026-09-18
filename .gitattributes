@@ -1,0 +1,12 @@
+# Shell scripts must keep LF endings - they run inside the Linux IRIS
+# containers and would break if checked out with CRLF on Windows.
+*.sh text eol=lf
+
+# Normalise the usual text types, leave everything else to git.
+*.py text
+*.html text
+*.md text
+*.txt text
+*.cfg text
+*.in text
+Makefile text eol=lf

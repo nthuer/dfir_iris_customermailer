@@ -1,0 +1,13 @@
+include README.md
+include LICENSE
+include AUTHORS.txt
+include requirements.txt
+
+# Send dialog and the default HTML mail templates must end up in the
+# wheel - without them the module installs but cannot render anything.
+recursive-include iris_customer_case_mailer_module/customer_case_mailer/ui/templates *.html
+recursive-include iris_customer_case_mailer_module/customer_case_mailer/mail_templates *.html
+
+recursive-exclude tests *
+recursive-exclude * __pycache__
+recursive-exclude * *.py[cod]

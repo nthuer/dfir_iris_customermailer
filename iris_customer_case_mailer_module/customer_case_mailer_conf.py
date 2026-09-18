@@ -168,10 +168,13 @@ module_configuration = [
     {
         "param_name": "mail_templates_dir",
         "param_human_name": "Mail template directory",
-        "param_description": ("Server path containing the HTML mail templates (Jinja2, same "
-                              "syntax as the IRIS report templates)."),
-        "default": "/opt/iris/customer_case_mailer/mail_templates",
-        "mandatory": True,
+        "param_description": ("Optional server path with your own HTML mail templates "
+                              "(Jinja2, same syntax as the IRIS report templates). Leave "
+                              "empty to use the templates shipped with the module. To use "
+                              "your own, mount a directory into the app and worker "
+                              "containers and enter its path here."),
+        "default": None,
+        "mandatory": False,
         "type": "string",
     },
     {
