@@ -94,11 +94,16 @@ ok "Built $WHEEL_NAME"
 
 # Fail fast if the templates did not make it into the wheel - the module
 # would install cleanly but be unable to render mails or the dialog.
+# The listing is captured once and matched with here-strings on purpose:
+# piping into `grep -q` under `set -o pipefail` reports a failed pipeline
+# even on a match, because grep exits at the first hit and unzip then
+# dies on SIGPIPE - which would reject a perfectly valid wheel.
 if command -v unzip >/dev/null 2>&1; then
-    if ! unzip -l "$WHEEL_PATH" | grep -q "mail_templates/.*\.html"; then
+    wheel_listing="$(unzip -l "$WHEEL_PATH")"
+    if ! grep -q "mail_templates/.*\.html" <<< "$wheel_listing"; then
         die "Wheel is missing the mail templates - check MANIFEST.in / package_data."
     fi
-    if ! unzip -l "$WHEEL_PATH" | grep -q "ui/templates/dialog\.html"; then
+    if ! grep -q "ui/templates/dialog\.html" <<< "$wheel_listing"; then
         die "Wheel is missing the send dialog - check MANIFEST.in / package_data."
     fi
     ok "Wheel contains dialog and mail templates"
