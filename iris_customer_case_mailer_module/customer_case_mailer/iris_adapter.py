@@ -48,8 +48,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .errors import AdapterError, AttachmentError, NotesError, ReportRenderError
 from .models import CaseContext, CustomerContact
 
-MODULE_NAME = "IrisCustomerCaseMailer"          # module_human_name in IRIS
-PACKAGE_NAME = "iris_customer_case_mailer_module"  # module_name in IRIS
+PACKAGE_NAME = "iris_customer_case_mailer_module"  # module_name column in IRIS
 
 _DOCX_EXT = (".docx",)
 _HTML_EXT = (".html", ".htm", ".md")

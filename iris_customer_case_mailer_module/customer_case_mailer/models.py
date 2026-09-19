@@ -147,7 +147,6 @@ class SendSelection:
     report_template: str          # template name or id (as string)
     report_format: str            # "docx" | "html"
     subject_override: Optional[str] = None  # final subject if set on the case
-    test_send: bool = False       # triggered via the test-send hook
 
 
 @dataclass(frozen=True)

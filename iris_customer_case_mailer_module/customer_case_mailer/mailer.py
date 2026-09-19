@@ -81,7 +81,7 @@ class CustomerCaseMailer:
 
     # ------------------------------------------------------------ rendering
 
-    def resolve_selection(self, ctx: CaseContext, test_send: bool = False) -> SendSelection:
+    def resolve_selection(self, ctx: CaseContext) -> SendSelection:
         """Per-case choices (case custom attributes), else module defaults."""
         opts = ctx.send_options or {}
         mail_template = opts.get("mail_template") or self.config.default_mail_template
@@ -102,7 +102,6 @@ class CustomerCaseMailer:
             report_template=report_template,
             report_format=report_format,
             subject_override=opts.get("subject") or None,
-            test_send=test_send,
         )
 
     def _subject(self, ctx: CaseContext, selection: SendSelection,
@@ -130,7 +129,7 @@ class CustomerCaseMailer:
         if not ctx.customer_name:
             raise RecipientError("No customer is assigned to this case.")
 
-        selection = self.resolve_selection(ctx, test_send)
+        selection = self.resolve_selection(ctx)
         partial["selection"] = selection
 
         recipients = resolve_recipients(ctx.contacts, self.config,
