@@ -142,8 +142,10 @@ install it into the IRIS containers, then register the module.
 **Requirements**
 
 - a running DFIR-IRIS (>= 2.4.27) deployment,
-- on the host: `docker`, `python3` with `setuptools` and `wheel`
-  (or `build`) – e.g. `python3 -m pip install setuptools wheel`,
+- on the host: `docker` and `tar`. **No Python or build tooling is
+  required** – if the host cannot build the wheel, the script builds it
+  inside an IRIS container (which ships Python, pip and setuptools), so
+  production hosts stay clean,
 - **at least one Investigation report template in IRIS.** A fresh IRIS
   installation has none. Upload one under *Advanced → Report
   templates* with type *Investigation* (IRIS ships a sample in its
@@ -161,6 +163,12 @@ The script builds the wheel, checks that the mail templates are inside,
 copies it to `/iriswebapp/dependencies/` in the containers, installs it
 with `pip3 install --force-reinstall` and restarts the containers.
 
+For the build it tries `python3 -m build`, `python3 -m pip wheel` and
+`python3 setup.py bdist_wheel` on the host, in that order. If none of
+them works – or there is no Python at all – it packs the sources, builds
+the wheel **inside an IRIS container** and copies it back. The output
+says which way was taken.
+
 **Always use `-a`** (app *and* worker container). The hooks run
 synchronously inside the **app** container, which the IRIS convention
 only covers with `-a`; without a flag only the worker is updated.
@@ -171,13 +179,14 @@ Non-standard container names can be overridden:
 IRIS_APP_CONTAINER=my_app IRIS_WORKER_CONTAINER=my_worker ./buildnpush2iris.sh -a
 ```
 
-**On Windows (Git Bash with Docker Desktop):** two additions are needed
-– `PYTHON` pointing to a Python with `setuptools`/`wheel` (there is no
-`python3` on Windows), and `MSYS_NO_PATHCONV=1`, otherwise Git Bash
-rewrites container paths like `/iriswebapp/dependencies` into Windows
-paths:
+**On Windows (Git Bash with Docker Desktop):** prefix the call with
+`MSYS_NO_PATHCONV=1`, otherwise Git Bash rewrites container paths like
+`/iriswebapp/dependencies` into Windows paths. There is no `python3` on
+Windows, so the build automatically runs inside the container – unless
+you point `PYTHON` at a local interpreter:
 
 ```bash
+MSYS_NO_PATHCONV=1 ./buildnpush2iris.sh -a
 MSYS_NO_PATHCONV=1 PYTHON=/c/path/to/venv/Scripts/python.exe ./buildnpush2iris.sh -a
 ```
 

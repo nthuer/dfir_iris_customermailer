@@ -35,12 +35,15 @@ Usage: ./buildnpush2iris.sh [-a|-h]
         module: its hooks run synchronously inside the app container).
   -h    Show this help.
 
+  No Python is required on the host: if it cannot build the wheel, the
+  build runs inside an IRIS container.
+
   Without a flag the module is installed into the worker container only.
 
 Environment overrides:
   IRIS_APP_CONTAINER      default: iriswebapp_app
   IRIS_WORKER_CONTAINER   default: iriswebapp_worker
-  PYTHON                  default: python3
+  PYTHON                  default: python3 (optional - falls back to a container build)
 USAGE
 }
 
@@ -60,7 +63,6 @@ done
 # --------------------------------------------------------------- checks
 
 command -v docker >/dev/null 2>&1 || die "docker not found in PATH."
-command -v "$PYTHON" >/dev/null 2>&1 || die "$PYTHON not found in PATH (override with PYTHON=...)."
 
 container_running() {
     docker ps --format '{{.Names}}' | grep -Fxq "$1"
@@ -74,16 +76,76 @@ if [ "$install_app" -eq 1 ]; then
 fi
 
 # ---------------------------------------------------------------- build
+#
+# No build tooling is required on the host: if the host cannot build the
+# wheel, it is built inside an IRIS container, which ships Python, pip
+# and setuptools. Production hosts stay clean.
+
+SRC_TARBALL="./.ccm_build_src.tar.gz"     # relative on purpose, see below
+trap 'rm -f "$SRC_TARBALL"' EXIT
+
+clean_build_dirs() { rm -rf dist build ./*.egg-info; }
+
+build_on_host() {
+    command -v "$PYTHON" >/dev/null 2>&1 || return 1
+
+    # In order of preference. setuptools >= 70.1 builds wheels without the
+    # separate 'wheel' package, and `pip wheel` brings its own build
+    # backend, so a bare pip is enough.
+    clean_build_dirs
+    "$PYTHON" -m build --wheel >/dev/null 2>&1 && return 0
+    clean_build_dirs
+    "$PYTHON" -m pip wheel --no-deps --wheel-dir dist . >/dev/null 2>&1 && return 0
+    clean_build_dirs
+    "$PYTHON" setup.py bdist_wheel >/dev/null 2>&1 && return 0
+    clean_build_dirs
+    return 1
+}
+
+build_in_container() {
+    local container="$APP_CONTAINER"
+    container_running "$container" || container="$WORKER_CONTAINER"
+    command -v tar >/dev/null 2>&1 || die "Building needs either Python on the host or 'tar' to build inside $container."
+
+    log "Building inside $container ..."
+    # Host paths stay relative and container paths absolute, so this also
+    # works in Git Bash on Windows (with MSYS_NO_PATHCONV=1).
+    # The archive is written into the directory being archived, so tar
+    # exits 1 with "file changed as we read it" even though the archive
+    # is fine. Verify the archive itself instead of trusting the code.
+    tar --exclude=.git --exclude=.venv --exclude=dist --exclude=build \
+        --exclude='*.egg-info' --exclude=__pycache__ --exclude="$(basename "$SRC_TARBALL")" \
+        -czf "$SRC_TARBALL" . 2>/dev/null || true
+    tar -tzf "$SRC_TARBALL" >/dev/null 2>&1 || die "Could not pack the sources."
+
+    docker exec "$container" sh -c 'rm -rf /tmp/ccm_build && mkdir -p /tmp/ccm_build' \
+        || die "Could not prepare the build directory in $container."
+    docker cp "$SRC_TARBALL" "$container:/tmp/ccm_build/src.tar.gz" \
+        || die "Could not copy the sources into $container."
+    docker exec "$container" sh -c '
+        cd /tmp/ccm_build && tar xzf src.tar.gz && rm -rf dist build ./*.egg-info
+        python3 setup.py bdist_wheel >/dev/null 2>&1 \
+            || pip3 wheel --no-deps --wheel-dir dist . >/dev/null 2>&1' \
+        || die "Building inside $container failed."
+
+    local produced
+    produced="$(docker exec "$container" sh -c 'ls -1 /tmp/ccm_build/dist/*.whl 2>/dev/null | head -n 1')"
+    [ -n "$produced" ] || die "No wheel was produced inside $container."
+    clean_build_dirs
+    mkdir -p dist
+    docker cp "$container:$produced" "dist/$(basename "$produced")" \
+        || die "Could not copy the wheel out of $container."
+    docker exec "$container" rm -rf /tmp/ccm_build >/dev/null 2>&1 || true
+}
 
 log "Building wheel ..."
-rm -rf dist build ./*.egg-info
-
-if "$PYTHON" -c "import build" >/dev/null 2>&1; then
-    "$PYTHON" -m build --wheel >/dev/null
-else
-    "$PYTHON" -c "import setuptools, wheel" >/dev/null 2>&1 \
-        || die "Building needs 'setuptools' and 'wheel' (or 'build'). Run: $PYTHON -m pip install setuptools wheel"
-    "$PYTHON" setup.py bdist_wheel >/dev/null
+if ! build_on_host; then
+    if command -v "$PYTHON" >/dev/null 2>&1; then
+        log "Host build failed ($PYTHON lacks a usable build backend) - using a container instead."
+    else
+        log "$PYTHON not found on the host - building in a container instead."
+    fi
+    build_in_container
 fi
 
 WHEEL_PATH="$(ls -1t dist/*.whl 2>/dev/null | head -n 1 || true)"
