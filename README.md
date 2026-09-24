@@ -131,7 +131,7 @@ iris_customer_case_mailer_module/
     ├── audit_service.py               # error/audit service (secret masking)
     ├── iris_adapter.py                # the ONLY place touching IRIS internals
     └── mail_templates/                # default HTML mail templates (shipped)
-tests/                                 # 90 unit/flow tests (run without IRIS)
+tests/                                 # 91 unit/flow tests (run without IRIS)
 ```
 
 ## Installation
@@ -488,7 +488,7 @@ python3 -m venv .venv
 make test          # or: python3 -m pytest
 ```
 
-90 tests, runnable without a running IRIS (IRIS access is encapsulated
+91 tests, runnable without a running IRIS (IRIS access is encapsulated
 in the `iris_adapter` and replaced by an in-memory fake in the tests).
 Covered among others: CISO contact selection and role matching, invalid
 contacts skipped and reported, preview notes, the preview gate
@@ -498,6 +498,12 @@ sends), per-case send options, test mode, SMTP with/without auth and
 TLS on/off, template and report rendering, note titles incl. the 155
 character limit, attachment handling, failure notes for every error
 path, and notes for configuration errors.
+
+`tests/test_smtp_integration.py` runs the real SMTP protocol over a
+socket against a minimal in-process mail server (no network access), and
+asserts what a mail server would actually receive: envelope recipients
+including BCC, headers without a BCC header, the RFC 2047 encoded
+subject, the HTML body and the report attachment.
 
 `tests/test_module_packaging.py` additionally guards the parts that
 would only break inside IRIS or after packaging: the
