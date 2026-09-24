@@ -47,7 +47,9 @@ the rendered report as a file.
 - The report is rendered via the **existing IRIS investigation report
   templates** (DOCX or HTML) and sent as a mail attachment.
 - HTML mail templates with the **same Jinja2 syntax as the IRIS report
-  templates**; a default template ships with the module.
+  templates**, editable **directly in IRIS** (code editor in the module
+  configuration, no mounted directory needed); a default template ships
+  with the module.
 - Template, report format and subject can be chosen **per case** via
   case custom attributes, otherwise the module defaults apply.
 - **Test mode / test send:** mail goes exclusively to the configured
@@ -131,7 +133,7 @@ iris_customer_case_mailer_module/
     ├── audit_service.py               # error/audit service (secret masking)
     ├── iris_adapter.py                # the ONLY place touching IRIS internals
     └── mail_templates/                # default HTML mail templates (shipped)
-tests/                                 # 91 unit/flow tests (run without IRIS)
+tests/                                 # 106 unit/flow tests (run without IRIS)
 ```
 
 ## Installation
@@ -228,8 +230,14 @@ need a CISO contact, see [Customer contacts](#customer-contacts-ciso).
 
 ### 4. Optional: own mail templates
 
-The module ships with a default HTML mail template. To use your own,
-mount a directory into **both** containers and point
+The module ships with a default HTML mail template. Own templates can be
+written **directly in IRIS**, see [Mail templates](#mail-templates) –
+no mount required. The parameter `mail_templates_html` is rendered as a
+code editor.
+
+Mounting a directory is only needed if you prefer to keep the templates
+as files (e.g. version-controlled and rolled out by configuration
+management). Then mount it into **both** containers and point
 `mail_templates_dir` at it.
 
 In the `docker-compose.yml` of your IRIS installation, the `app` and
@@ -336,7 +344,8 @@ Details of the matching:
 | `allowed_report_formats` | CSV | yes | `docx,html` | only `docx`/`html` |
 | `allowed_report_templates` | CSV | no | – | names/ids; empty = all |
 | `allowed_mail_templates` | CSV | no | – | file names; empty = all |
-| `mail_templates_dir` | string | no | – | own HTML mail templates; empty ⇒ the ones shipped with the module |
+| `mail_templates_html` | textfield_html | no | – | mail templates written in the IRIS editor, several separated by `<!-- template: name -->` |
+| `mail_templates_dir` | string | no | – | directory with mail template files; empty ⇒ the ones shipped with the module |
 | `default_mail_template` | string | no | `standard_customer_mail.html` | used unless the case sets its own |
 | `default_report_template` | string | no** | – | **needed unless every case sets its own |
 | `default_report_format` | string | no | `docx` | used unless the case sets its own |
@@ -374,11 +383,49 @@ preview again before sending.
 
 ## Mail templates
 
+Templates come from two sources, both optional, and both offered
+together in the per-case selection.
+
+### In the IRIS editor (no mount required)
+
+*Advanced → Modules → IrisCustomerCaseMailer → Mail templates (editor)*.
+The parameter is of type `textfield_html`, so IRIS shows it as a code
+editor with HTML highlighting. One parameter holds any number of named
+templates, separated by marker lines:
+
+```html
+<!-- template: closing_report -->
+<html><body>
+  <h2>Closing report: {{ case.name }}</h2>
+  <p>Dear Sir or Madam, …</p>
+</body></html>
+
+<!-- template: interim_update -->
+<html><body>
+  <p>Interim update for {{ case.for_customer }} …</p>
+</body></html>
+```
+
+- The marker name is what analysts select per case (`closing_report`).
+- Text before the first marker is ignored – room for notes.
+- A text **without** any marker counts as one template named `default`,
+  so a pasted template works without knowing the syntax.
+- Duplicate names, nameless markers and empty templates are rejected
+  with a clear error instead of silently dropping a template.
+- Editing a template changes the rendered mail, which invalidates an
+  existing preview – run the preview again before sending.
+
+Note the trade-off: templates edited here live in the IRIS database, so
+they are **not** version-controlled. If you need review and rollback for
+customer-facing wording, keep them as files instead.
+
+### As files
+
 - A default template (`standard_customer_mail.html`) ships inside the
-  wheel and is used when `mail_templates_dir` is empty.
-- To use your own: HTML files (`.html`/`.htm`) in the directory set as
-  `mail_templates_dir` (see [Installation](#installation) step 4);
-  multiple templates are supported and chosen per case.
+  wheel and is always available.
+- Own HTML files (`.html`/`.htm`) in the directory set as
+  `mail_templates_dir` (see [Installation](#installation) step 4).
+- On a name collision, the template from the editor wins.
 - **Same template syntax as the IRIS report templates** (Jinja2:
   `{{ … }}`, `{% … %}`).
 - Supported variables (at minimum):
@@ -488,7 +535,7 @@ python3 -m venv .venv
 make test          # or: python3 -m pytest
 ```
 
-91 tests, runnable without a running IRIS (IRIS access is encapsulated
+106 tests, runnable without a running IRIS (IRIS access is encapsulated
 in the `iris_adapter` and replaced by an in-memory fake in the tests).
 Covered among others: CISO contact selection and role matching, invalid
 contacts skipped and reported, preview notes, the preview gate

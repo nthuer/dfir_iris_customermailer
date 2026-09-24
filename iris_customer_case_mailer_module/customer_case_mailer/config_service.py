@@ -162,6 +162,8 @@ def load_config(raw: Optional[Dict[str, Any]]) -> MailerConfig:
         allowed_mail_templates=_csv_list(raw.get("allowed_mail_templates")),
         mail_templates_dir=(_as_str(raw.get("mail_templates_dir"))
                             or BUNDLED_MAIL_TEMPLATES_DIR),
+        # Not stripped: the editor content is a template, not a setting.
+        mail_templates_html=str(raw.get("mail_templates_html") or ""),
         # Default on: a production send must match a preview note.
         require_preview_before_send=(
             True if raw.get("require_preview_before_send") is None

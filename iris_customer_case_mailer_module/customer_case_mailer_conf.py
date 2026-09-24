@@ -179,6 +179,21 @@ module_configuration = [
         "type": "string",
     },
     {
+        "param_name": "mail_templates_html",
+        "param_human_name": "Mail templates (editor)",
+        "param_description": ("HTML mail templates, editable right here - IRIS shows this "
+                              "parameter as a code editor, so no directory has to be "
+                              "mounted. Separate several templates with marker lines: "
+                              "<!-- template: name -->. A text without any marker counts "
+                              "as one template named 'default'. Same Jinja2 syntax as the "
+                              "IRIS report templates. Templates defined here are offered "
+                              "in addition to the files in the template directory and win "
+                              "on a name collision."),
+        "default": None,
+        "mandatory": False,
+        "type": "textfield_html",
+    },
+    {
         "param_name": "default_mail_template",
         "param_human_name": "Default mail template",
         "param_description": ("Mail template used when the case does not set its own "

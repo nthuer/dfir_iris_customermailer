@@ -34,6 +34,7 @@ class MailerConfig:
     allowed_report_templates: List[str]   # empty = all investigation templates
     allowed_mail_templates: List[str]     # empty = all templates in the directory
     mail_templates_dir: str
+    mail_templates_html: str      # templates written in the IRIS editor
     require_preview_before_send: bool
     default_mail_template: Optional[str]
     default_report_template: Optional[str]
